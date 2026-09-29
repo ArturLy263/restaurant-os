@@ -15,7 +15,8 @@ class CreateBillResponse(BaseModel):
 
 
 class PaymentRequest(BaseModel):
-    amount: Decimal = Field(gt=0)
+    # Matches the Numeric(10, 2) money columns.
+    amount: Decimal = Field(gt=0, max_digits=10, decimal_places=2)
     method: str
 
 
