@@ -11,7 +11,6 @@ from app.schemas.order import (
     CreateOrderRequest,
     OrderDetailResponse,
     OrderItemResponse,
-    OrderItemModifierResponse,
     OrderResponse,
     CancelOrderItemRequest,
 )
@@ -66,25 +65,7 @@ def add_order_item(
         modifier_ids=request.modifier_ids,
     )
 
-    return OrderItemResponse(
-        id=order_item.id,
-        order_id=order_item.order_id,
-        product_id=order_item.product_id,
-        quantity=order_item.quantity,
-        unit_price=float(order_item.unit_price),
-        total_price=float(order_item.total_price),
-        status=order_item.status,
-        created_at=order_item.created_at,
-        modifiers=[
-            OrderItemModifierResponse(
-                id=modifier.id,
-                modifier_id=modifier.modifier_id,
-                name=modifier.name_snapshot,
-                price=float(modifier.price_snapshot),
-            )
-            for modifier in order_item.modifiers
-        ],
-    )
+    return order_item
 
 @router.post(
     "/{order_id}/send",
@@ -140,23 +121,4 @@ def cancel_order_item(
         reason=request.reason,
     )
 
-    return OrderItemResponse(
-        id=order_item.id,
-        order_id=order_item.order_id,
-        product_id=order_item.product_id,
-        quantity=order_item.quantity,
-        unit_price=float(order_item.unit_price),
-        total_price=float(order_item.total_price),
-        status=order_item.status,
-        created_at=order_item.created_at,
-        cancelled_at=order_item.cancelled_at,
-        modifiers=[
-            OrderItemModifierResponse(
-                id=modifier.id,
-                modifier_id=modifier.modifier_id,
-                name=modifier.name_snapshot,
-                price=float(modifier.price_snapshot),
-            )
-            for modifier in order_item.modifiers
-        ],
-    )
+    return order_item

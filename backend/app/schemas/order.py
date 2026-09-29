@@ -28,8 +28,9 @@ class AddOrderItemRequest(BaseModel):
 class OrderItemModifierResponse(BaseModel):
     id: uuid.UUID
     modifier_id: uuid.UUID
-    name: str
-    price: float
+    # Read from the OrderItemModifier snapshot columns, exposed as name/price.
+    name: str = Field(validation_alias="name_snapshot")
+    price: float = Field(validation_alias="price_snapshot")
 
 
 class OrderItemResponse(BaseModel):

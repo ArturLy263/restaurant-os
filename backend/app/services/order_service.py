@@ -194,41 +194,48 @@ class OrderService:
                         ),
                     )
 
-            selected_by_group: dict[uuid.UUID, int] = {}
+        # Validate every group on the product, including groups with no
+        # selected modifiers, so required groups cannot be skipped.
+        selected_by_group: dict[uuid.UUID, int] = {}
 
-            for modifier in selected_modifiers:
-                selected_by_group[modifier.group_id] = (
-                    selected_by_group.get(modifier.group_id, 0) + 1
+        for modifier in selected_modifiers:
+            selected_by_group[modifier.group_id] = (
+                selected_by_group.get(modifier.group_id, 0) + 1
+            )
+
+        for group in product.modifier_groups:
+            selected_count = selected_by_group.get(
+                group.id,
+                0,
+            )
+
+            min_selections = group.min_selections
+
+            if group.is_required:
+                min_selections = max(min_selections, 1)
+
+            if selected_count < min_selections:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Modifier group '{group.name}' "
+                        f"requires at least "
+                        f"{min_selections} selection(s)"
+                    ),
                 )
 
-            for group in product.modifier_groups:
-                selected_count = selected_by_group.get(
-                    group.id,
-                    0,
+            if (
+                group.max_selections is not None
+                and selected_count > group.max_selections
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Modifier group '{group.name}' "
+                        f"allows at most "
+                        f"{group.max_selections} selection(s)"
+                    ),
                 )
-
-                if selected_count < group.min_selections:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=(
-                            f"Modifier group '{group.name}' "
-                            f"requires at least "
-                            f"{group.min_selections} selection(s)"
-                        ),
-                    )
-
-                if (
-                    group.max_selections is not None
-                    and selected_count > group.max_selections
-                ):
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=(
-                            f"Modifier group '{group.name}' "
-                            f"allows at most "
-                            f"{group.max_selections} selection(s)"
-                        ),
-                    )
 
         base_price = Decimal(str(product.price))
 
