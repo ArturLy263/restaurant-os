@@ -49,6 +49,12 @@ class BillService:
         if existing_bill is not None:
             return existing_bill
 
+        if all(item.status == "CANCELLED" for item in order.items):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Order has no billable items; void the order instead",
+            )
+
         subtotal = sum(
             (
                 item.total_price
@@ -131,16 +137,11 @@ class BillService:
                 detail="Payment amount must be greater than zero",
             )
 
-        paid_amount = sum(
-            (
-                payment.amount
-                for payment in bill.payments
-                if payment.status == "COMPLETED"
-            ),
-            Decimal("0.00"),
-        )
-
-        remaining_amount = bill.total - paid_amount
+        # Remaining balance accounts for adjustments (e.g. items cancelled
+        # after the bill was created); bill.total is the original amount.
+        paid_amount = bill.paid_total
+        adjusted_total = bill.adjusted_total
+        remaining_amount = bill.amount_due
 
         if amount > remaining_amount:
             raise HTTPException(
@@ -176,7 +177,7 @@ class BillService:
 
         new_paid_amount = paid_amount + amount
 
-        if new_paid_amount == bill.total:
+        if new_paid_amount == adjusted_total:
             now = datetime.utcnow()
 
             bill.status = "PAID"

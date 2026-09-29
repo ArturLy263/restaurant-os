@@ -3,8 +3,10 @@ from datetime import datetime
 from decimal import Decimal
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.db.models.bill import Bill, BillAdjustment
 from app.db.models.category import Category
 from app.db.models.modifier import (
     Modifier,
@@ -458,6 +460,12 @@ class OrderService:
                 detail="Cannot cancel items in a closed order",
             )
 
+        if order.status == "CANCELLED":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot cancel items in a cancelled order",
+            )
+
         # Ensure the user is authorized (matches order creator like in other methods)
         if order.user_id != user_id:
             raise HTTPException(
@@ -504,6 +512,33 @@ class OrderService:
                     detail=f"Cannot cancel item. Preparation is already {prep.status}",
                 )
 
+        # Once a bill exists, a cancellation must be recorded as a bill
+        # adjustment. Validate the bill before changing anything.
+        bill = (
+            db.query(Bill)
+            .filter(Bill.order_id == order.id)
+            .first()
+        )
+
+        if bill is not None:
+            if bill.status != "OPEN":
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Cannot cancel an order item on a "
+                        f"{bill.status.lower()} bill"
+                    ),
+                )
+
+            if bill.paid_total > Decimal("0.00"):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "Cannot cancel an order item after payment "
+                        "has been made"
+                    ),
+                )
+
         now = datetime.utcnow()
         previous_item_status = item.status
 
@@ -537,6 +572,79 @@ class OrderService:
                     },
                 )
 
+        item_event_metadata = {
+            "order_id": str(order.id),
+            "previous_status": previous_item_status,
+            "reason": reason,
+            "cancelled_preparations": cancelled_preps,
+            "total_price": str(item.total_price),
+        }
+
+        if bill is not None:
+            item_event_metadata["bill_id"] = str(bill.id)
+
+        # A zero-priced item has no financial effect, so it needs no
+        # adjustment (and amount = 0 is rejected by the database).
+        if bill is not None and item.total_price != Decimal("0.00"):
+            # The original bill total stays unchanged; the cancellation is
+            # recorded as a negative adjustment in the same transaction.
+            adjustment = BillAdjustment(
+                restaurant_id=order.restaurant_id,
+                order_item_id=item.id,
+                type="ITEM_CANCELLATION",
+                amount=-item.total_price,
+                status="APPLIED",
+                reason=reason,
+                user_id=user_id,
+            )
+            bill.adjustments.append(adjustment)
+
+            try:
+                db.flush()
+            except IntegrityError as exc:
+                db.rollback()
+
+                violated_constraint = getattr(
+                    getattr(exc.orig, "diag", None),
+                    "constraint_name",
+                    None,
+                )
+
+                # Backstop: the partial unique index already holds an
+                # APPLIED cancellation for this item.
+                if (
+                    violated_constraint
+                    == "uq_bill_adjustments_applied_order_item_type"
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Order item is already cancelled",
+                    ) from exc
+
+                raise
+
+            EventService.record(
+                db=db,
+                restaurant_id=restaurant_id,
+                event_type="bill.adjusted",
+                entity_type="bill",
+                entity_id=bill.id,
+                user_id=user_id,
+                metadata={
+                    "adjustment_id": str(adjustment.id),
+                    "order_id": str(order.id),
+                    "order_item_id": str(item.id),
+                    "type": adjustment.type,
+                    "amount": str(adjustment.amount),
+                    "reason": reason,
+                    "original_total": str(bill.total),
+                    "adjusted_total": str(bill.adjusted_total),
+                    "amount_due": str(bill.amount_due),
+                },
+            )
+
+            item_event_metadata["adjustment_id"] = str(adjustment.id)
+
         EventService.record(
             db=db,
             restaurant_id=restaurant_id,
@@ -544,19 +652,152 @@ class OrderService:
             entity_type="order_item",
             entity_id=item.id,
             user_id=user_id,
-            metadata={
-                "order_id": str(order.id),
-                "previous_status": previous_item_status,
-                "reason": reason,
-                "cancelled_preparations": cancelled_preps,
-                "total_price": str(item.total_price),
-            },
+            metadata=item_event_metadata,
         )
 
         db.commit()
         db.refresh(item)
 
         return item
+
+    @staticmethod
+    def void_order(
+        db: Session,
+        restaurant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        order_id: uuid.UUID,
+        reason: str,
+    ) -> Order:
+        """
+        Explicitly cancel an order that has nothing left to bill.
+
+        Voids an OPEN zero-balance bill if one exists and frees the table.
+        Nothing is deleted.
+        """
+
+        order = (
+            db.query(Order)
+            .filter(
+                Order.id == order_id,
+                Order.restaurant_id == restaurant_id,
+            )
+            .first()
+        )
+
+        if not order:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Order not found",
+            )
+
+        if order.status == "CLOSED":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Order is already closed",
+            )
+
+        if order.status == "CANCELLED":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Order is already cancelled",
+            )
+
+        if order.user_id != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You cannot modify this order",
+            )
+
+        active_items_count = sum(
+            1
+            for item in order.items
+            if item.status != "CANCELLED"
+        )
+
+        if active_items_count > 0:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Order still has {active_items_count} active "
+                    f"item(s); cancel them before voiding the order"
+                ),
+            )
+
+        bill = (
+            db.query(Bill)
+            .filter(Bill.order_id == order.id)
+            .first()
+        )
+
+        if bill is not None:
+            if bill.status != "OPEN":
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Cannot void an order with a {bill.status.lower()} bill",
+                )
+
+            if bill.paid_total > Decimal("0.00"):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Cannot void an order after payment has been made",
+                )
+
+            if bill.amount_due != Decimal("0.00"):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Cannot void an order while an amount is still due",
+                )
+
+        now = datetime.utcnow()
+        previous_status = order.status
+
+        if bill is not None:
+            bill.status = "VOID"
+            bill.voided_at = now
+
+            EventService.record(
+                db=db,
+                restaurant_id=restaurant_id,
+                event_type="bill.voided",
+                entity_type="bill",
+                entity_id=bill.id,
+                user_id=user_id,
+                metadata={
+                    "order_id": str(order.id),
+                    "original_total": str(bill.total),
+                    "adjustments_total": str(bill.adjustments_total),
+                    "adjusted_total": str(bill.adjusted_total),
+                    "reason": reason,
+                },
+            )
+
+        order.status = "CANCELLED"
+        order.cancelled_at = now
+
+        table = db.get(Table, order.table_id)
+
+        if table is not None:
+            table.status = "AVAILABLE"
+
+        EventService.record(
+            db=db,
+            restaurant_id=restaurant_id,
+            event_type="order.cancelled",
+            entity_type="order",
+            entity_id=order.id,
+            user_id=user_id,
+            metadata={
+                "previous_status": previous_status,
+                "bill_id": str(bill.id) if bill is not None else None,
+                "table_id": str(order.table_id),
+                "reason": reason,
+            },
+        )
+
+        db.commit()
+        db.refresh(order)
+
+        return order
 
     @staticmethod
     def get_order(

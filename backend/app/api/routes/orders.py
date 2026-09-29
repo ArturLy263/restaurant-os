@@ -13,6 +13,7 @@ from app.schemas.order import (
     OrderItemResponse,
     OrderResponse,
     CancelOrderItemRequest,
+    VoidOrderRequest,
 )
 from app.services.order_service import OrderService
 
@@ -122,3 +123,24 @@ def cancel_order_item(
     )
 
     return order_item
+
+
+@router.post(
+    "/{order_id}/void",
+    response_model=OrderDetailResponse,
+)
+def void_order(
+    order_id: uuid.UUID,
+    request: VoidOrderRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    order = OrderService.void_order(
+        db=db,
+        restaurant_id=current_user.restaurant_id,
+        user_id=current_user.id,
+        order_id=order_id,
+        reason=request.reason,
+    )
+
+    return order

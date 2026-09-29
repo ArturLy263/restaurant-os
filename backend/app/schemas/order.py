@@ -59,3 +59,7 @@ class OrderDetailResponse(BaseModel):
 
 class CancelOrderItemRequest(BaseModel):
     reason: str = Field(..., min_length=1, max_length=500)
+
+
+class VoidOrderRequest(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=500)

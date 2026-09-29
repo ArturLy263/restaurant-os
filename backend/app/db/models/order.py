@@ -67,6 +67,10 @@ class Order(Base):
         DateTime,
     )
 
+    cancelled_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+    )
+
     items: Mapped[list["OrderItem"]] = relationship(
         back_populates="order",
         cascade="all, delete-orphan",
