@@ -32,6 +32,9 @@ class OrderRepository:
         if for_update:
             # Refresh an already-loaded order with the state read under
             # the lock, which may have changed while waiting for it.
+            # Only the order row is refreshed: relationships/collections
+            # loaded before the lock (e.g. order.items) may be stale, so
+            # callers must load them only after taking the lock.
             statement = (
                 statement
                 .with_for_update()

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
@@ -13,6 +13,14 @@ if TYPE_CHECKING:
 
 class Preparation(Base):
     __tablename__ = "preparations"
+
+    # An order item is sent at most once, so it has at most one preparation.
+    __table_args__ = (
+        UniqueConstraint(
+            "order_item_id",
+            name="uq_preparations_order_item_id",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True,

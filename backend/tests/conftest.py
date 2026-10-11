@@ -13,6 +13,7 @@ SAVEPOINT, so no test data is ever persisted.
 """
 
 import os
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -51,6 +52,7 @@ from sqlalchemy.pool import NullPool  # noqa: E402
 
 from app.db.database import engine  # noqa: E402
 from app.db.dependencies import get_db  # noqa: E402
+from app.db.models.bill import Bill  # noqa: E402
 from app.main import app  # noqa: E402
 
 from tests.factories import create_order, create_restaurant  # noqa: E402
@@ -204,4 +206,30 @@ def committed_order(db_engine):
             for model, row_id in created:
                 teardown.execute(delete(model).where(model.id == row_id))
 
+            teardown.commit()
+
+
+@pytest.fixture
+def committed_bill(db_engine, committed_order):
+    """An OPEN bill for `committed_order`, committed for row-lock tests.
+
+    Torn down before `committed_order`, so the bill is deleted first.
+    """
+
+    with Session(db_engine) as setup:
+        bill = Bill(
+            order_id=committed_order.order_id,
+            subtotal=Decimal("12.50"),
+            total=Decimal("12.50"),
+            status="OPEN",
+        )
+        setup.add(bill)
+        setup.commit()
+        bill_id = bill.id
+
+    try:
+        yield SimpleNamespace(**vars(committed_order), bill_id=bill_id)
+    finally:
+        with Session(db_engine) as teardown:
+            teardown.execute(delete(Bill).where(Bill.id == bill_id))
             teardown.commit()

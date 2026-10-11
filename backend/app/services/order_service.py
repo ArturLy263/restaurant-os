@@ -18,11 +18,78 @@ from app.db.models.preparation import Preparation
 from app.db.models.product import Product
 from app.db.models.station import Station
 from app.db.models.table import Table
+from app.repositories.bill_repository import BillRepository
 from app.repositories.order_repository import OrderRepository
 from app.services.event_service import EventService
 
 
+# Orders take new items, and further sends, until they are closed or
+# cancelled.
+ORDER_STATUSES_ACCEPTING_ITEMS = ("OPEN", "SENT")
+
+ITEM_ADDITION_REASON = "Item added after bill was created"
+
+
 class OrderService:
+
+    @staticmethod
+    def _ensure_order_accepts_items(order: Order) -> None:
+        if order.status not in ORDER_STATUSES_ACCEPTING_ITEMS:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Order is not open",
+            )
+
+    @staticmethod
+    def _apply_bill_adjustment(
+        db: Session,
+        bill: Bill,
+        order: Order,
+        item: OrderItem,
+        adjustment_type: str,
+        amount: Decimal,
+        reason: str,
+        user_id: uuid.UUID,
+    ) -> BillAdjustment:
+        """Record a signed adjustment on the bill and a bill.adjusted event.
+
+        The original bill total stays unchanged. Flushes the adjustment, so
+        an IntegrityError surfaces here, before the event is recorded.
+        """
+
+        adjustment = BillAdjustment(
+            restaurant_id=order.restaurant_id,
+            order_item_id=item.id,
+            type=adjustment_type,
+            amount=amount,
+            status="APPLIED",
+            reason=reason,
+            user_id=user_id,
+        )
+        bill.adjustments.append(adjustment)
+        db.flush()
+
+        EventService.record(
+            db=db,
+            restaurant_id=order.restaurant_id,
+            event_type="bill.adjusted",
+            entity_type="bill",
+            entity_id=bill.id,
+            user_id=user_id,
+            metadata={
+                "adjustment_id": str(adjustment.id),
+                "order_id": str(order.id),
+                "order_item_id": str(item.id),
+                "type": adjustment.type,
+                "amount": str(adjustment.amount),
+                "reason": reason,
+                "original_total": str(bill.total),
+                "adjusted_total": str(bill.adjusted_total),
+                "amount_due": str(bill.amount_due),
+            },
+        )
+
+        return adjustment
 
     @staticmethod
     def create_order(
@@ -98,7 +165,8 @@ class OrderService:
 
         modifier_ids = modifier_ids or []
 
-        # Lock the order so an item cannot be added while it is being sent.
+        # Lock the order so an item cannot be added while it is being sent,
+        # billed or paid.
         order = OrderRepository(db).get_for_restaurant(
             order_id,
             restaurant_id,
@@ -117,10 +185,19 @@ class OrderService:
                 detail="You cannot modify this order",
             )
 
-        if order.status != "OPEN":
+        OrderService._ensure_order_accepts_items(order)
+
+        # Once a bill exists, a new item is charged through a positive
+        # adjustment, which requires the bill to still be OPEN.
+        bill = BillRepository(db).get_for_order(order.id)
+
+        if bill is not None and bill.status != "OPEN":
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Order is not open",
+                detail=(
+                    f"Cannot add an item to a "
+                    f"{bill.status.lower()} bill"
+                ),
             )
 
         if quantity <= 0:
@@ -273,6 +350,42 @@ class OrderService:
 
             db.add(item_modifier)
 
+        item_event_metadata = {
+            "order_id": str(order.id),
+            "product_id": str(product.id),
+            "quantity": quantity,
+            "unit_price": str(base_price),
+            "total_price": str(total_price),
+            "modifiers": [
+                {
+                    "modifier_id": str(modifier.id),
+                    "name": modifier.name,
+                    "price": str(modifier.price_adjustment),
+                }
+                for modifier in selected_modifiers
+            ],
+        }
+
+        if bill is not None:
+            item_event_metadata["bill_id"] = str(bill.id)
+
+        # The original bill total stays unchanged; the new item is charged
+        # as a positive adjustment in the same transaction. A zero-priced
+        # item has no financial effect and needs no adjustment.
+        if bill is not None and total_price != Decimal("0.00"):
+            adjustment = OrderService._apply_bill_adjustment(
+                db=db,
+                bill=bill,
+                order=order,
+                item=item,
+                adjustment_type="ITEM_ADDITION",
+                amount=total_price,
+                reason=ITEM_ADDITION_REASON,
+                user_id=user_id,
+            )
+
+            item_event_metadata["adjustment_id"] = str(adjustment.id)
+
         EventService.record(
             db=db,
             restaurant_id=restaurant_id,
@@ -280,21 +393,7 @@ class OrderService:
             entity_type="order_item",
             entity_id=item.id,
             user_id=user_id,
-            metadata={
-                "order_id": str(order.id),
-                "product_id": str(product.id),
-                "quantity": quantity,
-                "unit_price": str(base_price),
-                "total_price": str(total_price),
-                "modifiers": [
-                    {
-                        "modifier_id": str(modifier.id),
-                        "name": modifier.name,
-                        "price": str(modifier.price_adjustment),
-                    }
-                    for modifier in selected_modifiers
-                ],
-            },
+            metadata=item_event_metadata,
         )
 
         db.commit()
@@ -330,17 +429,19 @@ class OrderService:
                 detail="You cannot modify this order",
             )
 
-        if order.status != "OPEN":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Order is not open",
-            )
+        # An order is sent in rounds: each send picks up only the items
+        # added since the previous one.
+        OrderService._ensure_order_accepts_items(order)
 
+        # Re-read item statuses under the lock, so an item sent by a
+        # concurrent request is never picked up again.
         items = (
             db.query(OrderItem)
             .filter(
                 OrderItem.order_id == order.id,
             )
+            .order_by(OrderItem.created_at, OrderItem.id)
+            .populate_existing()
             .all()
         )
 
@@ -350,7 +451,7 @@ class OrderService:
                 detail="Order has no items",
             )
 
-        sent_items_count = 0
+        sent_item_ids: list[str] = []
 
         for item in items:
 
@@ -398,14 +499,35 @@ class OrderService:
             )
 
             db.add(preparation)
-            sent_items_count += 1
+            sent_item_ids.append(str(item.id))
 
-        if sent_items_count == 0:
+        if not sent_item_ids:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Order has no items ready to send",
             )
 
+        try:
+            db.flush()
+        except IntegrityError as exc:
+            db.rollback()
+
+            violated_constraint = getattr(
+                getattr(exc.orig, "diag", None),
+                "constraint_name",
+                None,
+            )
+
+            # Backstop: one of the items already has a preparation.
+            if violated_constraint == "uq_preparations_order_item_id":
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Order item has already been sent",
+                ) from exc
+
+            raise
+
+        is_initial_send = order.status == "OPEN"
         order.status = "SENT"
 
         EventService.record(
@@ -416,7 +538,9 @@ class OrderService:
             entity_id=order.id,
             user_id=user_id,
             metadata={
-                "items_count": sent_items_count,
+                "items_count": len(sent_item_ids),
+                "item_ids": sent_item_ids,
+                "initial": is_initial_send,
             },
         )
 
@@ -435,14 +559,12 @@ class OrderService:
         item_id: uuid.UUID,
         reason: str,
     ) -> OrderItem:
-        # Load the order to verify tenant and user
-        order = (
-            db.query(Order)
-            .filter(
-                Order.id == order_id,
-                Order.restaurant_id == restaurant_id,
-            )
-            .first()
+        # Lock the order so the cancellation cannot race a send, a new
+        # item or a payment on its bill.
+        order = OrderRepository(db).get_for_restaurant(
+            order_id,
+            restaurant_id,
+            for_update=True,
         )
 
         if not order:
@@ -512,11 +634,7 @@ class OrderService:
 
         # Once a bill exists, a cancellation must be recorded as a bill
         # adjustment. Validate the bill before changing anything.
-        bill = (
-            db.query(Bill)
-            .filter(Bill.order_id == order.id)
-            .first()
-        )
+        bill = BillRepository(db).get_for_order(order.id)
 
         if bill is not None:
             if bill.status != "OPEN":
@@ -586,19 +704,17 @@ class OrderService:
         if bill is not None and item.total_price != Decimal("0.00"):
             # The original bill total stays unchanged; the cancellation is
             # recorded as a negative adjustment in the same transaction.
-            adjustment = BillAdjustment(
-                restaurant_id=order.restaurant_id,
-                order_item_id=item.id,
-                type="ITEM_CANCELLATION",
-                amount=-item.total_price,
-                status="APPLIED",
-                reason=reason,
-                user_id=user_id,
-            )
-            bill.adjustments.append(adjustment)
-
             try:
-                db.flush()
+                adjustment = OrderService._apply_bill_adjustment(
+                    db=db,
+                    bill=bill,
+                    order=order,
+                    item=item,
+                    adjustment_type="ITEM_CANCELLATION",
+                    amount=-item.total_price,
+                    reason=reason,
+                    user_id=user_id,
+                )
             except IntegrityError as exc:
                 db.rollback()
 
@@ -620,26 +736,6 @@ class OrderService:
                     ) from exc
 
                 raise
-
-            EventService.record(
-                db=db,
-                restaurant_id=restaurant_id,
-                event_type="bill.adjusted",
-                entity_type="bill",
-                entity_id=bill.id,
-                user_id=user_id,
-                metadata={
-                    "adjustment_id": str(adjustment.id),
-                    "order_id": str(order.id),
-                    "order_item_id": str(item.id),
-                    "type": adjustment.type,
-                    "amount": str(adjustment.amount),
-                    "reason": reason,
-                    "original_total": str(bill.total),
-                    "adjusted_total": str(bill.adjusted_total),
-                    "amount_due": str(bill.amount_due),
-                },
-            )
 
             item_event_metadata["adjustment_id"] = str(adjustment.id)
 
@@ -673,13 +769,12 @@ class OrderService:
         Nothing is deleted.
         """
 
-        order = (
-            db.query(Order)
-            .filter(
-                Order.id == order_id,
-                Order.restaurant_id == restaurant_id,
-            )
-            .first()
+        # Lock the order so no item can be added and no payment taken
+        # while it is being voided.
+        order = OrderRepository(db).get_for_restaurant(
+            order_id,
+            restaurant_id,
+            for_update=True,
         )
 
         if not order:
@@ -721,11 +816,7 @@ class OrderService:
                 ),
             )
 
-        bill = (
-            db.query(Bill)
-            .filter(Bill.order_id == order.id)
-            .first()
-        )
+        bill = BillRepository(db).get_for_order(order.id)
 
         if bill is not None:
             if bill.status != "OPEN":

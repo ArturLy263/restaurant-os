@@ -6,8 +6,10 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.models.bill import Bill, Payment
-from app.db.models.order import Order
+from app.db.models.order import Order, OrderItem
 from app.db.models.table import Table
+from app.repositories.bill_repository import BillRepository
+from app.repositories.order_repository import OrderRepository
 from app.services.event_service import EventService
 
 
@@ -34,17 +36,22 @@ class BillService:
                 detail="Order does not belong to this restaurant",
             )
 
+        # Lock the order so items cannot be added or cancelled while the
+        # bill total is computed, and concurrent requests cannot both
+        # create a bill. State read below is current as of the lock.
+        order = OrderRepository(db).get_for_restaurant(
+            order.id,
+            restaurant_id,
+            for_update=True,
+        )
+
         if order.status != "SENT":
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Order is not ready for billing",
             )
 
-        existing_bill = (
-            db.query(Bill)
-            .filter(Bill.order_id == order.id)
-            .first()
-        )
+        existing_bill = BillRepository(db).get_for_order(order.id)
 
         if existing_bill is not None:
             return existing_bill
@@ -125,6 +132,16 @@ class BillService:
                 detail="Bill does not belong to this restaurant",
             )
 
+        # Lock the order (and so its bill) before checking the balance, so
+        # concurrent payments or item changes cannot act on a stale amount
+        # due. Re-read both under the lock.
+        order = OrderRepository(db).get_for_restaurant(
+            order.id,
+            restaurant_id,
+            for_update=True,
+        )
+        bill = BillRepository(db).get_for_order(order.id)
+
         if bill.status != "OPEN":
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -148,6 +165,28 @@ class BillService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Payment exceeds remaining bill amount",
             )
+
+        # The final payment closes the order, after which unsent items can
+        # no longer be sent or cancelled. Checked under the order lock, so
+        # no item can be added between this check and the payment.
+        if amount == remaining_amount:
+            has_unsent_items = db.query(
+                db.query(OrderItem)
+                .filter(
+                    OrderItem.order_id == order.id,
+                    OrderItem.status == "ADDED",
+                )
+                .exists()
+            ).scalar()
+
+            if has_unsent_items:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "Order has unsent items; send or cancel them "
+                        "before the final payment"
+                    ),
+                )
 
         payment = Payment(
             bill_id=bill.id,

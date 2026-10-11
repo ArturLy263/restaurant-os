@@ -141,6 +141,23 @@ class Pos:
     def table(self):
         return self._fresh().get(Table, self.restaurant.table.id)
 
+    def items(self, order_id):
+        return (
+            self._fresh()
+            .query(OrderItem)
+            .filter(OrderItem.order_id == order_id)
+            .all()
+        )
+
+    def preparations(self, order_id):
+        return (
+            self._fresh()
+            .query(Preparation)
+            .join(OrderItem, Preparation.order_item_id == OrderItem.id)
+            .filter(OrderItem.order_id == order_id)
+            .all()
+        )
+
     def preparation(self, item_id):
         return (
             self._fresh()
@@ -170,18 +187,18 @@ class Pos:
 
     def assert_bill_matches_items(self, bill_id):
         """
-        Financial invariant: original total + applied cancellation
-        adjustments == total of the order's non-cancelled items.
+        Financial invariant: original total + all applied adjustments
+        (ITEM_ADDITION and ITEM_CANCELLATION) == total of the order's
+        non-cancelled items.
         """
 
         bill = self.bill(bill_id)
 
-        cancellations = sum(
+        applied_adjustments = sum(
             (
                 adjustment.amount
                 for adjustment in bill.adjustments
                 if adjustment.status == "APPLIED"
-                and adjustment.type == "ITEM_CANCELLATION"
             ),
             Decimal("0.00"),
         )
@@ -195,7 +212,7 @@ class Pos:
             Decimal("0.00"),
         )
 
-        assert bill.total + cancellations == active_items_total
+        assert bill.total + applied_adjustments == active_items_total
         assert bill.adjusted_total == active_items_total
 
 
@@ -205,6 +222,20 @@ def coke(db_session, restaurant):
         category_id=restaurant.category.id,
         name="Coca-Cola",
         price=Decimal("2.50"),
+        station_id=restaurant.station.id,
+    )
+    db_session.add(product)
+    db_session.flush()
+
+    return product
+
+
+@pytest.fixture
+def water(db_session, restaurant):
+    product = Product(
+        category_id=restaurant.category.id,
+        name="Tap water",
+        price=Decimal("0.00"),
         station_id=restaurant.station.id,
     )
     db_session.add(product)

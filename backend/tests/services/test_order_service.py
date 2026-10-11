@@ -1,14 +1,12 @@
+import uuid
 from decimal import Decimal
 
 import pytest
-from psycopg.errors import LockNotAvailable
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
 
 from app.db.models.modifier import Modifier, ModifierGroup
 from app.db.models.preparation import Preparation
 from app.services.order_service import OrderService
+from tests.locking import assert_waits_for_order_lock
 
 
 def _open_order(db_session, restaurant):
@@ -107,40 +105,31 @@ def test_send_order_routes_items_to_product_station(db_session, restaurant):
             user_id=ids.user_id,
             order_id=ids.order_id,
         ),
+        lambda db, ids: OrderService.cancel_order_item(
+            db=db,
+            restaurant_id=ids.restaurant_id,
+            user_id=ids.user_id,
+            order_id=ids.order_id,
+            item_id=uuid.uuid4(),
+            reason="Lock test",
+        ),
+        lambda db, ids: OrderService.void_order(
+            db=db,
+            restaurant_id=ids.restaurant_id,
+            user_id=ids.user_id,
+            order_id=ids.order_id,
+            reason="Lock test",
+        ),
     ],
-    ids=["add_order_item", "send_order"],
+    ids=["add_order_item", "send_order", "cancel_order_item", "void_order"],
 )
 def test_order_writes_wait_for_order_row_lock(
     db_engine,
     committed_order,
     call,
 ):
-    with db_engine.connect() as holder:
-        # NO KEY UPDATE conflicts with the service's FOR UPDATE but not with
-        # the KEY SHARE lock taken by foreign-key checks on inserted items,
-        # so only an explicit order lock can make the call time out.
-        holder.execute(
-            text("SELECT id FROM orders WHERE id = :id FOR NO KEY UPDATE"),
-            {"id": committed_order.order_id},
-        )
-
-        # Service commits only release a SAVEPOINT; nothing is persisted.
-        with db_engine.connect() as connection:
-            transaction = connection.begin()
-            session = Session(
-                bind=connection,
-                join_transaction_mode="create_savepoint",
-            )
-
-            try:
-                session.execute(text("SET LOCAL lock_timeout = '200ms'"))
-
-                with pytest.raises(OperationalError) as exc_info:
-                    call(session, committed_order)
-
-                assert isinstance(exc_info.value.orig, LockNotAvailable)
-            finally:
-                session.close()
-                transaction.rollback()
-
-        holder.rollback()
+    assert_waits_for_order_lock(
+        db_engine,
+        committed_order.order_id,
+        lambda session: call(session, committed_order),
+    )

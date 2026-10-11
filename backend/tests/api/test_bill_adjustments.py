@@ -11,7 +11,6 @@ from sqlalchemy.exc import IntegrityError
 
 import app.services.order_service as order_service
 from app.db.models.bill import BillAdjustment
-from app.db.models.product import Product
 
 
 # --- Before a bill exists ---
@@ -458,20 +457,6 @@ def test_unrelated_integrity_error_is_not_reported_as_duplicate(
 
 
 # --- Zero-priced items ---
-
-
-@pytest.fixture
-def water(pos):
-    product = Product(
-        category_id=pos.restaurant.category.id,
-        name="Tap water",
-        price=Decimal("0.00"),
-        station_id=pos.restaurant.station.id,
-    )
-    pos.db.add(product)
-    pos.db.flush()
-
-    return product
 
 
 @pytest.fixture
