@@ -14,6 +14,7 @@ SAVEPOINT, so no test data is ever persisted.
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 from dotenv import dotenv_values
 
@@ -42,7 +43,7 @@ import pytest  # noqa: E402
 from alembic import command  # noqa: E402
 from alembic.config import Config  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import create_engine, text  # noqa: E402
+from sqlalchemy import create_engine, delete, text  # noqa: E402
 from sqlalchemy.engine import make_url  # noqa: E402
 from sqlalchemy.exc import OperationalError  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
@@ -52,7 +53,7 @@ from app.db.database import engine  # noqa: E402
 from app.db.dependencies import get_db  # noqa: E402
 from app.main import app  # noqa: E402
 
-from tests.factories import create_restaurant  # noqa: E402
+from tests.factories import create_order, create_restaurant  # noqa: E402
 
 
 def _ensure_test_database_exists() -> None:
@@ -160,3 +161,47 @@ def db_client(db_session):
 @pytest.fixture
 def restaurant(db_session):
     return create_restaurant(db_session)
+
+
+@pytest.fixture
+def committed_order(db_engine):
+    """An OPEN order committed so that other connections can see and lock it.
+
+    Row-lock tests need a second connection, which cannot see the
+    rolled-back `db_session` transaction. The rows are deleted afterwards.
+    """
+
+    with Session(db_engine) as setup:
+        restaurant = create_restaurant(setup, name="Committed Restaurant")
+        order = create_order(setup, restaurant)
+        setup.commit()
+
+        # Deletion order respects foreign keys.
+        created = [
+            (type(row), row.id)
+            for row in (
+                order,
+                restaurant.product,
+                restaurant.category,
+                restaurant.table,
+                restaurant.station,
+                restaurant.user,
+                restaurant.role,
+                restaurant.restaurant,
+            )
+        ]
+        ids = SimpleNamespace(
+            order_id=order.id,
+            restaurant_id=restaurant.restaurant.id,
+            user_id=restaurant.user.id,
+            product_id=restaurant.product.id,
+        )
+
+    try:
+        yield ids
+    finally:
+        with Session(db_engine) as teardown:
+            for model, row_id in created:
+                teardown.execute(delete(model).where(model.id == row_id))
+
+            teardown.commit()

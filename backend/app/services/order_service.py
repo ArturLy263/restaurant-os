@@ -18,6 +18,7 @@ from app.db.models.preparation import Preparation
 from app.db.models.product import Product
 from app.db.models.station import Station
 from app.db.models.table import Table
+from app.repositories.order_repository import OrderRepository
 from app.services.event_service import EventService
 
 
@@ -97,13 +98,11 @@ class OrderService:
 
         modifier_ids = modifier_ids or []
 
-        order = (
-            db.query(Order)
-            .filter(
-                Order.id == order_id,
-                Order.restaurant_id == restaurant_id,
-            )
-            .first()
+        # Lock the order so an item cannot be added while it is being sent.
+        order = OrderRepository(db).get_for_restaurant(
+            order_id,
+            restaurant_id,
+            for_update=True,
         )
 
         if not order:
@@ -311,13 +310,12 @@ class OrderService:
         order_id: uuid.UUID,
     ) -> Order:
 
-        order = (
-            db.query(Order)
-            .filter(
-                Order.id == order_id,
-                Order.restaurant_id == restaurant_id,
-            )
-            .first()
+        # Lock the order so concurrent sends cannot both pick up the same
+        # ADDED items and create duplicate preparations.
+        order = OrderRepository(db).get_for_restaurant(
+            order_id,
+            restaurant_id,
+            for_update=True,
         )
 
         if not order:

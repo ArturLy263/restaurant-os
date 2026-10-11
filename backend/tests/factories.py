@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token, hash_password
 from app.db.models.category import Category
+from app.db.models.order import Order
 from app.db.models.product import Product
 from app.db.models.restaurant import Restaurant
 from app.db.models.role import Role
@@ -73,6 +74,22 @@ def create_restaurant(db: Session, name: str = "Test Restaurant"):
         category=category,
         product=product,
     )
+
+
+def create_order(db: Session, restaurant, status: str = "OPEN") -> Order:
+    """Insert an order directly, bypassing OrderService side effects."""
+
+    order = Order(
+        restaurant_id=restaurant.restaurant.id,
+        table_id=restaurant.table.id,
+        user_id=restaurant.user.id,
+        guest_count=2,
+        status=status,
+    )
+    db.add(order)
+    db.flush()
+
+    return order
 
 
 def auth_headers(user: User) -> dict[str, str]:
