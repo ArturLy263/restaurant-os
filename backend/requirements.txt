@@ -1,0 +1,13 @@
+# Runtime dependencies of the RestaurantOS API, pinned to tested versions.
+# Install with the constraints file so transitive dependencies match too:
+#   pip install -r backend/requirements.txt -c backend/constraints.txt
+alembic==1.20.0
+bcrypt==5.0.0
+email-validator==2.3.0
+fastapi==0.141.1
+psycopg[binary]==3.3.5
+pydantic==2.13.5
+pydantic-settings==2.15.0
+python-jose[cryptography]==3.5.0
+SQLAlchemy==2.0.53
+uvicorn==0.52.4

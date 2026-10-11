@@ -68,7 +68,23 @@ def run_migrations_online() -> None:
     In this scenario we need to create an Engine
     and associate a connection with the context.
 
+    A caller may instead pass an open connection as
+    ``config.attributes["connection"]``; the migration tests use this to
+    migrate a disposable database whose identity they have verified.
+
     """
+    connection = config.attributes.get("connection")
+
+    if connection is not None:
+        context.configure(
+            connection=connection, target_metadata=target_metadata
+        )
+
+        with context.begin_transaction():
+            context.run_migrations()
+
+        return
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

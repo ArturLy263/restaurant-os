@@ -10,6 +10,12 @@ Database-backed tests run against PostgreSQL in "<dev database>_test"
 with Alembic once per session. Each test runs inside a transaction that
 is rolled back afterwards; service-level commit() calls only release a
 SAVEPOINT, so no test data is ever persisted.
+
+Every test is marked `unit`, `integration` or `migrations` according to
+the database fixtures it actually uses (see pytest_collection_modifyitems).
+Database tests are skipped when PostgreSQL is unreachable, unless
+REQUIRE_TEST_DATABASE=1, which turns any skipped database test into a
+failure (used by CI).
 """
 
 import os
@@ -24,15 +30,31 @@ from tests.db_url import resolve_test_database_url
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+_dotenv = dotenv_values(REPO_ROOT / ".env")
+
 _dev_database_url = (
     os.environ.get("DATABASE_URL")
-    or dotenv_values(REPO_ROOT / ".env").get("DATABASE_URL")
+    or _dotenv.get("DATABASE_URL")
 )
 
 TEST_DATABASE_URL = resolve_test_database_url(
     dev_database_url=_dev_database_url,
-    test_database_url=os.environ.get("TEST_DATABASE_URL"),
+    test_database_url=(
+        os.environ.get("TEST_DATABASE_URL")
+        or _dotenv.get("TEST_DATABASE_URL")
+    ),
 )
+
+_require_test_database = os.environ.get("REQUIRE_TEST_DATABASE", "")
+
+if _require_test_database not in ("", "0", "1"):
+    raise RuntimeError(
+        "REQUIRE_TEST_DATABASE must be '1' (database tests must run) or "
+        f"'0'/unset (skip them when PostgreSQL is unreachable), "
+        f"got {_require_test_database!r}."
+    )
+
+REQUIRE_TEST_DATABASE = _require_test_database == "1"
 
 # Environment variables take precedence over .env in pydantic-settings.
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
@@ -55,7 +77,77 @@ from app.db.dependencies import get_db  # noqa: E402
 from app.db.models.bill import Bill  # noqa: E402
 from app.main import app  # noqa: E402
 
+from tests.disposable_database import disposable_database  # noqa: E402
 from tests.factories import create_order, create_restaurant  # noqa: E402
+
+
+# Fixtures whose use decides a test's marker; every other test is `unit`.
+DATABASE_FIXTURE_MARKERS = {
+    "db_engine": "integration",
+    "migration_database": "migrations",
+}
+DATABASE_MARKERS = set(DATABASE_FIXTURE_MARKERS.values())
+TEST_KIND_MARKERS = {"unit", *DATABASE_MARKERS}
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        explicit = {
+            marker.name
+            for marker in item.iter_markers()
+            if marker.name in TEST_KIND_MARKERS
+        }
+
+        if explicit:
+            raise pytest.UsageError(
+                f"{item.nodeid}: {sorted(explicit)} markers are assigned "
+                "automatically from the fixtures a test uses; remove them."
+            )
+
+        kinds = {
+            marker
+            for fixture, marker in DATABASE_FIXTURE_MARKERS.items()
+            if fixture in item.fixturenames
+        }
+
+        if len(kinds) > 1:
+            raise pytest.UsageError(
+                f"{item.nodeid} uses both the shared test database and a "
+                "disposable migration database; split the test."
+            )
+
+        item.add_marker(kinds.pop() if kinds else "unit")
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item, call):
+    report = yield
+
+    if (
+        REQUIRE_TEST_DATABASE
+        and report.skipped
+        and not hasattr(report, "wasxfail")
+        and DATABASE_MARKERS & {marker.name for marker in item.iter_markers()}
+    ):
+        reason = report.longrepr
+        if isinstance(reason, tuple):
+            reason = reason[2]
+
+        report.outcome = "failed"
+        report.longrepr = (
+            "REQUIRE_TEST_DATABASE=1 does not allow database tests to be "
+            f"skipped. Skip reason: {reason}"
+        )
+
+    return report
+
+
+def pytest_report_header(config):
+    return (
+        "test database: "
+        f"{make_url(TEST_DATABASE_URL).render_as_string()} "
+        f"(REQUIRE_TEST_DATABASE={'1' if REQUIRE_TEST_DATABASE else '0'})"
+    )
 
 
 def _ensure_test_database_exists() -> None:
@@ -90,8 +182,6 @@ _database_unavailable_reason: str | None = None
 
 @pytest.fixture(scope="session")
 def db_engine():
-    global _database_unavailable_reason
-
     test_database_name = make_url(TEST_DATABASE_URL).database
 
     if engine.url.database != test_database_name:
@@ -101,23 +191,72 @@ def db_engine():
             returncode=1,
         )
 
-    # A skipped session fixture is retried by every test; fail fast instead.
-    if _database_unavailable_reason is not None:
-        pytest.skip(_database_unavailable_reason)
-
-    try:
-        _ensure_test_database_exists()
-    except OperationalError as exc:
-        error = str(exc.orig or exc).strip().splitlines()[-1]
-        _database_unavailable_reason = (
-            "PostgreSQL test database unavailable at "
-            f"{make_url(TEST_DATABASE_URL).render_as_string()}: {error}"
-        )
-        pytest.skip(_database_unavailable_reason)
-
+    _require_database_server()
+    _ensure_test_database_exists()
     command.upgrade(Config(str(REPO_ROOT / "alembic.ini")), "head")
 
+    # Check the database actually reached, not just the configured URL.
+    with engine.connect() as connection:
+        connected_to = connection.scalar(text("SELECT current_database()"))
+
+    if connected_to != test_database_name:
+        pytest.exit(
+            f"Application engine is connected to '{connected_to}', "
+            f"expected test database '{test_database_name}'. Aborting.",
+            returncode=1,
+        )
+
     return engine
+
+
+def _require_database_server() -> None:
+    """Skip (or, with REQUIRE_TEST_DATABASE=1, fail) without PostgreSQL."""
+
+    global _database_unavailable_reason
+
+    # A skipped session fixture is retried by every test; fail fast instead.
+    if _database_unavailable_reason is None:
+        maintenance_engine = create_engine(
+            make_url(TEST_DATABASE_URL).set(database="postgres"),
+            poolclass=NullPool,
+        )
+
+        try:
+            with maintenance_engine.connect():
+                return
+        except OperationalError as exc:
+            error = str(exc.orig or exc).strip().splitlines()[-1]
+            _database_unavailable_reason = (
+                "PostgreSQL test server unavailable at "
+                f"{make_url(TEST_DATABASE_URL).render_as_string()}: {error}"
+            )
+        finally:
+            maintenance_engine.dispose()
+
+    if REQUIRE_TEST_DATABASE:
+        pytest.fail(
+            f"{_database_unavailable_reason} (REQUIRE_TEST_DATABASE=1)",
+            pytrace=False,
+        )
+
+    pytest.skip(_database_unavailable_reason)
+
+
+@pytest.fixture
+def migration_database():
+    """An empty, disposable database for destructive migration tests.
+
+    Created on the test database server under a random name and dropped
+    afterwards; see tests/disposable_database.py for the safety checks.
+    """
+
+    _require_database_server()
+
+    with disposable_database(
+        server_url=TEST_DATABASE_URL,
+        protected_urls=[_dev_database_url, TEST_DATABASE_URL],
+    ) as database:
+        yield database
 
 
 @pytest.fixture

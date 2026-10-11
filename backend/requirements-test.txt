@@ -1,2 +1,6 @@
-pytest==8.4.2
+# Test dependencies (includes the runtime dependencies).
+#   pip install -r backend/requirements-test.txt -c backend/constraints.txt
+-r requirements.txt
 httpx==0.28.1
+pytest==8.4.2
+python-dotenv==1.2.3
