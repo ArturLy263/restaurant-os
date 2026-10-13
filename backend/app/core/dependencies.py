@@ -1,11 +1,12 @@
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.errors import ApiError, ErrorCode
 from app.db.dependencies import get_db
 from app.db.models.user import User
 
@@ -18,9 +19,10 @@ def get_current_user(
     db: Session = Depends(get_db),
 ) -> User:
 
-    credentials_exception = HTTPException(
+    credentials_exception = ApiError(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
+        code=ErrorCode.NOT_AUTHENTICATED,
+        message="Could not validate credentials",
         headers={
             "WWW-Authenticate": "Bearer",
         },
@@ -51,9 +53,10 @@ def get_current_user(
         raise credentials_exception
 
     if not user.is_active:
-        raise HTTPException(
+        raise ApiError(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="User is inactive",
+            code=ErrorCode.USER_INACTIVE,
+            message="User is inactive",
         )
 
     return user

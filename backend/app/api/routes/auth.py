@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
+from app.core.errors import ApiError, ErrorCode
 from app.db.dependencies import get_db
 from app.schemas.auth import LoginRequest, TokenResponse
 from app.services.auth_service import AuthService
@@ -27,9 +28,10 @@ def login(
             password=request.password,
         )
     except ValueError:
-        raise HTTPException(
+        raise ApiError(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
+            code=ErrorCode.INVALID_CREDENTIALS,
+            message="Invalid email or password",
         )
 
     return TokenResponse(

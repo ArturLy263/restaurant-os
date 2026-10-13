@@ -2,12 +2,14 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from fastapi import HTTPException, status
+from fastapi import status
 from sqlalchemy.orm import Session
 
+from app.core.errors import ApiError, ErrorCode
 from app.db.models.bill import Bill, Payment
 from app.db.models.order import Order, OrderItem
 from app.db.models.table import Table
+from app.db.unit_of_work import commit
 from app.repositories.bill_repository import BillRepository
 from app.repositories.order_repository import OrderRepository
 from app.services.event_service import EventService
@@ -25,15 +27,17 @@ class BillService:
         order = db.get(Order, order_id)
 
         if order is None:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order not found",
+                code=ErrorCode.ORDER_NOT_FOUND,
+                message="Order not found",
             )
 
         if order.restaurant_id != restaurant_id:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Order does not belong to this restaurant",
+                code=ErrorCode.TENANT_ACCESS_DENIED,
+                message="Order does not belong to this restaurant",
             )
 
         # Lock the order so items cannot be added or cancelled while the
@@ -46,9 +50,10 @@ class BillService:
         )
 
         if order.status != "SENT":
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Order is not ready for billing",
+                code=ErrorCode.ORDER_NOT_READY_FOR_BILLING,
+                message="Order is not ready for billing",
             )
 
         existing_bill = BillRepository(db).get_for_order(order.id)
@@ -57,9 +62,10 @@ class BillService:
             return existing_bill
 
         if all(item.status == "CANCELLED" for item in order.items):
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Order has no billable items; void the order instead",
+                code=ErrorCode.ORDER_HAS_NO_BILLABLE_ITEMS,
+                message="Order has no billable items; void the order instead",
             )
 
         subtotal = sum(
@@ -96,7 +102,7 @@ class BillService:
             },
         )
 
-        db.commit()
+        commit(db)
         db.refresh(bill)
 
         return bill
@@ -113,23 +119,26 @@ class BillService:
         bill = db.get(Bill, bill_id)
 
         if bill is None:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Bill not found",
+                code=ErrorCode.BILL_NOT_FOUND,
+                message="Bill not found",
             )
 
         order = db.get(Order, bill.order_id)
 
         if order is None:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order not found",
+                code=ErrorCode.ORDER_NOT_FOUND,
+                message="Order not found",
             )
 
         if order.restaurant_id != restaurant_id:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Bill does not belong to this restaurant",
+                code=ErrorCode.TENANT_ACCESS_DENIED,
+                message="Bill does not belong to this restaurant",
             )
 
         # Lock the order (and so its bill) before checking the balance, so
@@ -143,15 +152,17 @@ class BillService:
         bill = BillRepository(db).get_for_order(order.id)
 
         if bill.status != "OPEN":
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Bill is not open",
+                code=ErrorCode.BILL_NOT_OPEN,
+                message="Bill is not open",
             )
 
         if amount <= Decimal("0.00"):
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Payment amount must be greater than zero",
+                code=ErrorCode.INVALID_PAYMENT_AMOUNT,
+                message="Payment amount must be greater than zero",
             )
 
         # Remaining balance accounts for adjustments (e.g. items cancelled
@@ -161,9 +172,10 @@ class BillService:
         remaining_amount = bill.amount_due
 
         if amount > remaining_amount:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Payment exceeds remaining bill amount",
+                code=ErrorCode.PAYMENT_EXCEEDS_AMOUNT_DUE,
+                message="Payment exceeds remaining bill amount",
             )
 
         # The final payment closes the order, after which unsent items can
@@ -180,9 +192,10 @@ class BillService:
             ).scalar()
 
             if has_unsent_items:
-                raise HTTPException(
+                raise ApiError(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail=(
+                    code=ErrorCode.ORDER_HAS_UNSENT_ITEMS,
+                    message=(
                         "Order has unsent items; send or cancel them "
                         "before the final payment"
                     ),
@@ -243,7 +256,7 @@ class BillService:
                 },
             )
 
-        db.commit()
+        commit(db)
         db.refresh(payment)
 
         return payment
@@ -258,23 +271,26 @@ class BillService:
         bill = db.get(Bill, bill_id)
 
         if bill is None:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Bill not found",
+                code=ErrorCode.BILL_NOT_FOUND,
+                message="Bill not found",
             )
 
         order = db.get(Order, bill.order_id)
 
         if order is None:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order not found",
+                code=ErrorCode.ORDER_NOT_FOUND,
+                message="Order not found",
             )
 
         if order.restaurant_id != restaurant_id:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Bill does not belong to this restaurant",
+                code=ErrorCode.TENANT_ACCESS_DENIED,
+                message="Bill does not belong to this restaurant",
             )
 
         return bill

@@ -112,6 +112,118 @@ repository root.
    docs are at <http://127.0.0.1:8000/docs>. Log in as
    `admin@restaurantos.com` with `ADMIN_PASSWORD`.
 
+## API conventions
+
+### Errors
+
+Every error response, whatever its status, has the same body:
+
+```json
+{
+  "detail": "Payment exceeds remaining bill amount",
+  "error": {
+    "code": "PAYMENT_EXCEEDS_AMOUNT_DUE",
+    "message": "Payment exceeds remaining bill amount",
+    "request_id": "3f2b8c1e9d4a4f0b8e6c2a7d5b1e0f93"
+  }
+}
+```
+
+- `error.code` is stable; program against it. The full list is
+  `ErrorCode` in `backend/app/core/errors.py` (e.g. `ORDER_NOT_FOUND`,
+  `TABLE_NOT_AVAILABLE`, `BILL_NOT_OPEN`, `ORDER_HAS_UNSENT_ITEMS`).
+  Errors raised by the framework get a code from their status
+  (`NOT_FOUND`, `NOT_AUTHENTICATED`, ...).
+- `error.message` is for people and may change.
+- `detail` is kept for compatibility with existing clients. It equals
+  `message`, except for request validation errors (422,
+  `VALIDATION_ERROR`), where it is still FastAPI's list of field errors.
+- Unexpected failures return 500 `INTERNAL_ERROR` with the message
+  `Internal server error`; the exception is logged on the server, never
+  returned.
+- Every response, successful or not, has an `X-Request-ID` header, equal
+  to `error.request_id` on errors and included in the server log line of
+  unexpected errors. A client may send its own `X-Request-ID` (1-128
+  characters from `A-Z a-z 0-9 . _ : -`); anything else is replaced by a
+  generated ID.
+
+Status codes are unchanged: 400/422 for invalid input, 401 for missing or
+invalid credentials, 403 for other users' or other restaurants'
+resources, 404 for missing ones, 409 when the current state forbids the
+operation.
+
+### Idempotency keys
+
+These mutations accept an `Idempotency-Key` header:
+
+| Operation | Endpoint |
+| --- | --- |
+| Open an order for a table | `POST /api/v1/orders` |
+| Send an order's new items | `POST /api/v1/orders/{order_id}/send` |
+| Cancel an order item | `POST /api/v1/orders/{order_id}/items/{item_id}/cancel` |
+| Void (cancel) an order | `POST /api/v1/orders/{order_id}/void` |
+| Take a payment (closes the order when fully paid) | `POST /api/v1/bills/{bill_id}/payments` |
+
+Clients should generate a new key (e.g. a UUID) for each operation and
+reuse it only when retrying that same operation, for example after a
+timeout or a lost connection.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/bills/$BILL_ID/payments \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: 0b6f2a52-6d3e-4f61-a3c5-2b8f1f4c9e10" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": "15.00", "method": "CARD"}'
+```
+
+- **Without a key** the request behaves exactly as before: no
+  deduplication. A retried payment is a second payment (if the bill
+  allows it); a retried send or void gets a 409. The key is optional so
+  existing clients keep working; new clients should always send it.
+- **Format:** 1-255 printable ASCII characters without spaces; otherwise
+  400 `IDEMPOTENCY_KEY_INVALID`.
+- **Scope:** keys belong to the authenticated user within their
+  restaurant. The same key from another user or restaurant is a different
+  key and never returns someone else's result.
+- **Same key, same request:** the operation is not run again. The
+  response is the stored status code and body of the first request,
+  with an extra `Idempotent-Replayed: true` header. "Same request" means
+  the same method, endpoint, path parameters and body; JSON key order and
+  amount formatting (`15`, `"15.0"`, `"15.00"`) do not matter.
+- **Same key, different request:** 422 `IDEMPOTENCY_KEY_REUSED`, every
+  time, and nothing is run.
+- **Concurrent requests with the same key:** the second waits until the
+  first finishes, then gets its stored result. The operation runs once.
+- **When the operation fails:** only successful (2xx) results are stored.
+  An error response (e.g. 409) or a crash rolls back the business change
+  and the key together, so nothing is stored and a retry with the same key
+  runs the operation again against the current state. A request waiting on
+  a failed one runs the operation itself.
+- **Atomicity:** the business change, its audit events, the key and the
+  stored response are committed in one database transaction. A committed
+  change always has its stored result, and a stored result always belongs
+  to a committed change.
+- **Lifetime:** stored results are kept for at least 24 hours. After that
+  the key may be used again as a new key (expired records are replaced
+  when their key is reused; there is no background purge yet).
+- A replay returns the result as it was, not the current state: replaying
+  a send does not send items added since. Use a new key for the next send.
+
+### Concurrency guarantees
+
+- Writes to an order, its items, its bill and its payments lock the order
+  row first (`SELECT ... FOR UPDATE`), so they apply one at a time.
+- Opening an order locks the table row. A table has at most one active
+  (`OPEN` or `SENT`) order: a concurrent second request gets 409
+  `TABLE_NOT_AVAILABLE` (or `TABLE_HAS_ACTIVE_ORDER` if the table is
+  marked available while an order is still active). Once the order is
+  `CLOSED` (fully paid) or `CANCELLED` (voided) the table is free again.
+- This is enforced by the lock, not by a unique index: existing
+  development databases can contain several active orders for one table
+  from before this rule, and a migration must not fail on them or rewrite
+  them. Such tables stay `OCCUPIED` and simply reject new orders until
+  their orders are closed or voided.
+
 ## Tests
 
 ```bash
@@ -134,7 +246,13 @@ Tests never touch the development database.
   `DATABASE_URL` with `_test` appended (e.g. `restaurant_os_test`), or
   `TEST_DATABASE_URL` if set; the name must end with `_test`. It is
   created and migrated automatically, and each test runs in a transaction
-  that is rolled back.
+  that is rolled back. Concurrency tests
+  (`backend/tests/integration/test_mutation_concurrency.py`) need real
+  commits on separate connections instead: they commit their own
+  restaurant to the test database and delete everything it owns
+  afterwards. They order concurrent requests by holding row locks and
+  waiting on PostgreSQL's lock graph (`pg_blocking_pids`), not on timers
+  (see `backend/tests/concurrency.py`).
 - **Migration tests** create a new, empty database on the same server
   under a random name (`restaurantos_disposable_<random>_test`), tagged
   with a random token. Before migrating or dropping it they verify that

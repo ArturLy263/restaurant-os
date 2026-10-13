@@ -4,6 +4,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
+from app.api.idempotency import IDEMPOTENT_ROUTE_RESPONSES, Idempotency
 from app.core.dependencies import get_current_user
 from app.db.dependencies import get_db
 from app.db.models.user import User
@@ -48,19 +49,24 @@ def create_bill(
     "/{bill_id}/payments",
     response_model=PaymentResponse,
     status_code=status.HTTP_201_CREATED,
+    responses=IDEMPOTENT_ROUTE_RESPONSES,
 )
 def create_payment(
     bill_id: uuid.UUID,
     request: PaymentRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    idempotency: Idempotency = Depends(),
 ):
-    return BillService.create_payment(
-        db=db,
-        restaurant_id=current_user.restaurant_id,
-        bill_id=bill_id,
-        amount=request.amount,
-        method=request.method,
+    return idempotency.run(
+        lambda: BillService.create_payment(
+            db=db,
+            restaurant_id=current_user.restaurant_id,
+            bill_id=bill_id,
+            amount=request.amount,
+            method=request.method,
+        ),
+        payload=request,
     )
 
 @router.get(

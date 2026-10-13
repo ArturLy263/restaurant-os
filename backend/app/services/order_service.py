@@ -2,10 +2,11 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from fastapi import HTTPException, status
+from fastapi import status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.errors import ApiError, ErrorCode
 from app.db.models.bill import Bill, BillAdjustment
 from app.db.models.category import Category
 from app.db.models.modifier import (
@@ -18,14 +19,20 @@ from app.db.models.preparation import Preparation
 from app.db.models.product import Product
 from app.db.models.station import Station
 from app.db.models.table import Table
+from app.db.unit_of_work import commit
 from app.repositories.bill_repository import BillRepository
 from app.repositories.order_repository import OrderRepository
+from app.repositories.table_repository import TableRepository
 from app.services.event_service import EventService
 
 
 # Orders take new items, and further sends, until they are closed or
 # cancelled.
 ORDER_STATUSES_ACCEPTING_ITEMS = ("OPEN", "SENT")
+
+# A table has at most one order in these statuses; CLOSED and CANCELLED
+# are terminal and free the table.
+ACTIVE_ORDER_STATUSES = ("OPEN", "SENT")
 
 ITEM_ADDITION_REASON = "Item added after bill was created"
 
@@ -35,9 +42,10 @@ class OrderService:
     @staticmethod
     def _ensure_order_accepts_items(order: Order) -> None:
         if order.status not in ORDER_STATUSES_ACCEPTING_ITEMS:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Order is not open",
+                code=ErrorCode.ORDER_NOT_OPEN,
+                message="Order is not open",
             )
 
     @staticmethod
@@ -100,25 +108,46 @@ class OrderService:
         guest_count: int,
     ) -> Order:
 
-        table = (
-            db.query(Table)
-            .filter(
-                Table.id == table_id,
-                Table.restaurant_id == restaurant_id,
-            )
-            .first()
+        # Lock the table row, so concurrent requests for the same table are
+        # serialized: the second one sees the table OCCUPIED by the first.
+        # Every change of a table's status (here, on void and on the final
+        # payment) updates this row, so it cannot interleave either.
+        table = TableRepository(db).get_for_restaurant(
+            table_id,
+            restaurant_id,
+            for_update=True,
         )
 
         if not table:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Table not found",
+                code=ErrorCode.TABLE_NOT_FOUND,
+                message="Table not found",
             )
 
         if table.status != "AVAILABLE":
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Table is not available",
+                code=ErrorCode.TABLE_NOT_AVAILABLE,
+                message="Table is not available",
+            )
+
+        # Belt and braces for tables whose status was left AVAILABLE while
+        # an order is still active (checked under the table lock).
+        has_active_order = db.query(
+            db.query(Order)
+            .filter(
+                Order.table_id == table.id,
+                Order.status.in_(ACTIVE_ORDER_STATUSES),
+            )
+            .exists()
+        ).scalar()
+
+        if has_active_order:
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.TABLE_HAS_ACTIVE_ORDER,
+                message="Table already has an active order",
             )
 
         order = Order(
@@ -147,7 +176,7 @@ class OrderService:
 
         table.status = "OCCUPIED"
 
-        db.commit()
+        commit(db)
         db.refresh(order)
 
         return order
@@ -174,15 +203,17 @@ class OrderService:
         )
 
         if not order:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order not found",
+                code=ErrorCode.ORDER_NOT_FOUND,
+                message="Order not found",
             )
 
         if order.user_id != user_id:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="You cannot modify this order",
+                code=ErrorCode.ORDER_ACCESS_DENIED,
+                message="You cannot modify this order",
             )
 
         OrderService._ensure_order_accepts_items(order)
@@ -192,18 +223,20 @@ class OrderService:
         bill = BillRepository(db).get_for_order(order.id)
 
         if bill is not None and bill.status != "OPEN":
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=(
+                code=ErrorCode.BILL_NOT_OPEN,
+                message=(
                     f"Cannot add an item to a "
                     f"{bill.status.lower()} bill"
                 ),
             )
 
         if quantity <= 0:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Quantity must be greater than zero",
+                code=ErrorCode.INVALID_QUANTITY,
+                message="Quantity must be greater than zero",
             )
 
         product = (
@@ -220,15 +253,17 @@ class OrderService:
         )
 
         if not product:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Product not found",
+                code=ErrorCode.PRODUCT_NOT_FOUND,
+                message="Product not found",
             )
 
         if not product.is_active:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Product is not active",
+                code=ErrorCode.PRODUCT_INACTIVE,
+                message="Product is not active",
             )
 
         selected_modifiers: list[Modifier] = []
@@ -252,9 +287,10 @@ class OrderService:
             )
 
             if len(selected_modifiers) != len(unique_modifier_ids):
-                raise HTTPException(
+                raise ApiError(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="One or more modifiers are invalid",
+                    code=ErrorCode.MODIFIER_INVALID,
+                    message="One or more modifiers are invalid",
                 )
 
             allowed_group_ids = {
@@ -264,9 +300,10 @@ class OrderService:
 
             for modifier in selected_modifiers:
                 if modifier.group_id not in allowed_group_ids:
-                    raise HTTPException(
+                    raise ApiError(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=(
+                        code=ErrorCode.MODIFIER_INVALID,
+                        message=(
                             f"Modifier '{modifier.name}' "
                             f"is not available for product '{product.name}'"
                         ),
@@ -293,9 +330,10 @@ class OrderService:
                 min_selections = max(min_selections, 1)
 
             if selected_count < min_selections:
-                raise HTTPException(
+                raise ApiError(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
+                    code=ErrorCode.MODIFIER_SELECTION_INVALID,
+                    message=(
                         f"Modifier group '{group.name}' "
                         f"requires at least "
                         f"{min_selections} selection(s)"
@@ -306,9 +344,10 @@ class OrderService:
                 group.max_selections is not None
                 and selected_count > group.max_selections
             ):
-                raise HTTPException(
+                raise ApiError(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
+                    code=ErrorCode.MODIFIER_SELECTION_INVALID,
+                    message=(
                         f"Modifier group '{group.name}' "
                         f"allows at most "
                         f"{group.max_selections} selection(s)"
@@ -396,7 +435,7 @@ class OrderService:
             metadata=item_event_metadata,
         )
 
-        db.commit()
+        commit(db)
         db.refresh(item)
 
         return item
@@ -418,15 +457,17 @@ class OrderService:
         )
 
         if not order:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order not found",
+                code=ErrorCode.ORDER_NOT_FOUND,
+                message="Order not found",
             )
 
         if order.user_id != user_id:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="You cannot modify this order",
+                code=ErrorCode.ORDER_ACCESS_DENIED,
+                message="You cannot modify this order",
             )
 
         # An order is sent in rounds: each send picks up only the items
@@ -446,9 +487,10 @@ class OrderService:
         )
 
         if not items:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Order has no items",
+                code=ErrorCode.ORDER_HAS_NO_ITEMS,
+                message="Order has no items",
             )
 
         sent_item_ids: list[str] = []
@@ -472,21 +514,24 @@ class OrderService:
             )
 
             if not product:
-                raise HTTPException(
+                raise ApiError(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Product not found: {item.product_id}",
+                    code=ErrorCode.PRODUCT_NOT_FOUND,
+                    message=f"Product not found: {item.product_id}",
                 )
 
             if not product.is_active:
-                raise HTTPException(
+                raise ApiError(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Product is not active: {product.id}",
+                    code=ErrorCode.PRODUCT_INACTIVE,
+                    message=f"Product is not active: {product.id}",
                 )
 
             if not product.station_id:
-                raise HTTPException(
+                raise ApiError(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Product {product.id} has no station",
+                    code=ErrorCode.PRODUCT_HAS_NO_STATION,
+                    message=f"Product {product.id} has no station",
                 )
 
             item.status = "SENT"
@@ -502,9 +547,10 @@ class OrderService:
             sent_item_ids.append(str(item.id))
 
         if not sent_item_ids:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Order has no items ready to send",
+                code=ErrorCode.ORDER_HAS_NO_ITEMS_TO_SEND,
+                message="Order has no items ready to send",
             )
 
         try:
@@ -520,9 +566,10 @@ class OrderService:
 
             # Backstop: one of the items already has a preparation.
             if violated_constraint == "uq_preparations_order_item_id":
-                raise HTTPException(
+                raise ApiError(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="Order item has already been sent",
+                    code=ErrorCode.ORDER_ITEM_ALREADY_SENT,
+                    message="Order item has already been sent",
                 ) from exc
 
             raise
@@ -544,7 +591,7 @@ class OrderService:
             },
         )
 
-        db.commit()
+        commit(db)
         db.refresh(order)
 
         return order
@@ -568,29 +615,33 @@ class OrderService:
         )
 
         if not order:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order not found",
+                code=ErrorCode.ORDER_NOT_FOUND,
+                message="Order not found",
             )
 
         # Check order status
         if order.status == "CLOSED":
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Cannot cancel items in a closed order",
+                code=ErrorCode.ORDER_CLOSED,
+                message="Cannot cancel items in a closed order",
             )
 
         if order.status == "CANCELLED":
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Cannot cancel items in a cancelled order",
+                code=ErrorCode.ORDER_CANCELLED,
+                message="Cannot cancel items in a cancelled order",
             )
 
         # Ensure the user is authorized (matches order creator like in other methods)
         if order.user_id != user_id:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="You cannot modify this order",
+                code=ErrorCode.ORDER_ACCESS_DENIED,
+                message="You cannot modify this order",
             )
 
         # Load the item with its preparations
@@ -604,15 +655,17 @@ class OrderService:
         )
 
         if not item:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order item not found",
+                code=ErrorCode.ORDER_ITEM_NOT_FOUND,
+                message="Order item not found",
             )
 
         if item.status == "CANCELLED":
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Order item is already cancelled",
+                code=ErrorCode.ORDER_ITEM_ALREADY_CANCELLED,
+                message="Order item is already cancelled",
             )
 
         # Load preparations explicitly just in case
@@ -627,9 +680,10 @@ class OrderService:
         # Check preparation states
         for prep in preparations:
             if prep.status in ("READY", "SERVED"):
-                raise HTTPException(
+                raise ApiError(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Cannot cancel item. Preparation is already {prep.status}",
+                    code=ErrorCode.ORDER_ITEM_NOT_CANCELLABLE,
+                    message=f"Cannot cancel item. Preparation is already {prep.status}",
                 )
 
         # Once a bill exists, a cancellation must be recorded as a bill
@@ -638,18 +692,20 @@ class OrderService:
 
         if bill is not None:
             if bill.status != "OPEN":
-                raise HTTPException(
+                raise ApiError(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail=(
+                    code=ErrorCode.BILL_NOT_OPEN,
+                    message=(
                         f"Cannot cancel an order item on a "
                         f"{bill.status.lower()} bill"
                     ),
                 )
 
             if bill.paid_total > Decimal("0.00"):
-                raise HTTPException(
+                raise ApiError(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail=(
+                    code=ErrorCode.BILL_HAS_PAYMENTS,
+                    message=(
                         "Cannot cancel an order item after payment "
                         "has been made"
                     ),
@@ -730,9 +786,10 @@ class OrderService:
                     violated_constraint
                     == "uq_bill_adjustments_applied_order_item_type"
                 ):
-                    raise HTTPException(
+                    raise ApiError(
                         status_code=status.HTTP_409_CONFLICT,
-                        detail="Order item is already cancelled",
+                        code=ErrorCode.ORDER_ITEM_ALREADY_CANCELLED,
+                        message="Order item is already cancelled",
                     ) from exc
 
                 raise
@@ -749,7 +806,7 @@ class OrderService:
             metadata=item_event_metadata,
         )
 
-        db.commit()
+        commit(db)
         db.refresh(item)
 
         return item
@@ -778,27 +835,31 @@ class OrderService:
         )
 
         if not order:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order not found",
+                code=ErrorCode.ORDER_NOT_FOUND,
+                message="Order not found",
             )
 
         if order.status == "CLOSED":
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Order is already closed",
+                code=ErrorCode.ORDER_CLOSED,
+                message="Order is already closed",
             )
 
         if order.status == "CANCELLED":
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Order is already cancelled",
+                code=ErrorCode.ORDER_CANCELLED,
+                message="Order is already cancelled",
             )
 
         if order.user_id != user_id:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="You cannot modify this order",
+                code=ErrorCode.ORDER_ACCESS_DENIED,
+                message="You cannot modify this order",
             )
 
         active_items_count = sum(
@@ -808,9 +869,10 @@ class OrderService:
         )
 
         if active_items_count > 0:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=(
+                code=ErrorCode.ORDER_HAS_ACTIVE_ITEMS,
+                message=(
                     f"Order still has {active_items_count} active "
                     f"item(s); cancel them before voiding the order"
                 ),
@@ -820,21 +882,24 @@ class OrderService:
 
         if bill is not None:
             if bill.status != "OPEN":
-                raise HTTPException(
+                raise ApiError(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Cannot void an order with a {bill.status.lower()} bill",
+                    code=ErrorCode.BILL_NOT_OPEN,
+                    message=f"Cannot void an order with a {bill.status.lower()} bill",
                 )
 
             if bill.paid_total > Decimal("0.00"):
-                raise HTTPException(
+                raise ApiError(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="Cannot void an order after payment has been made",
+                    code=ErrorCode.BILL_HAS_PAYMENTS,
+                    message="Cannot void an order after payment has been made",
                 )
 
             if bill.amount_due != Decimal("0.00"):
-                raise HTTPException(
+                raise ApiError(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="Cannot void an order while an amount is still due",
+                    code=ErrorCode.BILL_AMOUNT_DUE,
+                    message="Cannot void an order while an amount is still due",
                 )
 
         now = datetime.utcnow()
@@ -883,7 +948,7 @@ class OrderService:
             },
         )
 
-        db.commit()
+        commit(db)
         db.refresh(order)
 
         return order
@@ -905,9 +970,10 @@ class OrderService:
         )
 
         if not order:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order not found",
+                code=ErrorCode.ORDER_NOT_FOUND,
+                message="Order not found",
             )
 
         return order
@@ -938,9 +1004,10 @@ class OrderService:
         )
 
         if not preparation:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Preparation not found",
+                code=ErrorCode.PREPARATION_NOT_FOUND,
+                message="Preparation not found",
             )
 
         current_status = preparation.status
@@ -954,9 +1021,10 @@ class OrderService:
         expected_next_status = valid_transitions.get(current_status)
 
         if expected_next_status != new_status:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=(
+                code=ErrorCode.INVALID_PREPARATION_TRANSITION,
+                message=(
                     f"Invalid preparation transition: "
                     f"{current_status} -> {new_status}"
                 ),
@@ -979,9 +1047,10 @@ class OrderService:
             event_type = "preparation.served"
 
         else:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Unsupported preparation status",
+                code=ErrorCode.BAD_REQUEST,
+                message="Unsupported preparation status",
             )
 
         order_item = (
@@ -993,9 +1062,10 @@ class OrderService:
         )
 
         if not order_item:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order item not found",
+                code=ErrorCode.ORDER_ITEM_NOT_FOUND,
+                message="Order item not found",
             )
 
         EventService.record(
@@ -1012,7 +1082,7 @@ class OrderService:
             },
         )
 
-        db.commit()
+        commit(db)
         db.refresh(preparation)
 
         return preparation
@@ -1034,9 +1104,10 @@ class OrderService:
         )
 
         if not station:
-            raise HTTPException(
+            raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Station not found",
+                code=ErrorCode.STATION_NOT_FOUND,
+                message="Station not found",
             )
 
         preparations = (
