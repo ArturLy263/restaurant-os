@@ -239,8 +239,9 @@ def test_keys_are_scoped_per_restaurant(pos, db_session, db_client):
         headers=auth_headers(other.user),
     )
 
-    assert response.status_code == 403
-    assert response.json()["error"]["code"] == "TENANT_ACCESS_DENIED"
+    # Reported like a missing bill, so its existence is not revealed.
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "BILL_NOT_FOUND"
     assert REPLAYED_HEADER not in response.headers
     assert len(payments(pos, bill_id)) == 1
 
@@ -335,13 +336,14 @@ def test_send_without_key_retry_gets_a_conflict(pos):
 
 def test_cancel_retry_applies_one_financial_adjustment(pos):
     order_id, burger_id, _, bill_id = pos.billed_order()
-    path = f"/api/v1/orders/{order_id}/items/{burger_id}/cancel"
+    path = f"/api/v1/bills/{bill_id}/items/{burger_id}/cancel"
 
     first = post(pos, path, "cancel-1", json={"reason": "Wrong dish"})
     again = post(pos, path, "cancel-1", json={"reason": "Wrong dish"})
 
     assert first.status_code == 200
-    assert first.json()["status"] == "CANCELLED"
+    assert first.json()["amount_due"] == "2.50"
+    assert pos.item(burger_id).status == "CANCELLED"
     assert_replay(first, again)
 
     [adjustment] = pos.adjustments(bill_id)
@@ -353,8 +355,8 @@ def test_cancel_retry_applies_one_financial_adjustment(pos):
 
 
 def test_cancel_with_different_reason_is_a_different_request(pos):
-    order_id, burger_id, _, _ = pos.billed_order()
-    path = f"/api/v1/orders/{order_id}/items/{burger_id}/cancel"
+    _, burger_id, _, bill_id = pos.billed_order()
+    path = f"/api/v1/bills/{bill_id}/items/{burger_id}/cancel"
 
     assert post(pos, path, "c", json={"reason": "Wrong dish"}).status_code == 200
     response = post(pos, path, "c", json={"reason": "Too slow"})

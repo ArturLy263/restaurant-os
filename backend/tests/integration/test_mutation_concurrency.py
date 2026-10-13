@@ -191,7 +191,7 @@ def test_concurrent_cancels_with_same_key_adjust_once(db_engine, live):
         "orders",
         order_id,
         "POST",
-        f"/api/v1/orders/{order_id}/items/{burger_id}/cancel",
+        f"/api/v1/bills/{bill_id}/items/{burger_id}/cancel",
         json={"reason": "Wrong dish"},
         headers=live.headers("cancel-race"),
     )
@@ -472,3 +472,46 @@ def test_service_committing_directly_cannot_split_an_idempotent_request(
 
     assert plain.status_code == 201
     assert live.payments(bill_id) == 1
+
+
+def test_preparation_transition_waits_for_a_queued_cancellation(db_engine, live):
+    """Transitions lock the order, so they cannot revive a cancelled dish.
+
+    A cancellation and then a transition queue on the order lock; the
+    transition runs second and sees the preparation already CANCELLED.
+    """
+
+    order_id, (burger_id, _) = live.open_order()
+    assert live.post(f"/api/v1/orders/{order_id}/send").status_code == 200
+    preparation_id = live.scalar(
+        "SELECT id FROM preparations WHERE order_item_id = :i", i=burger_id
+    )
+
+    with concurrency(db_engine) as run:
+        gate = run.gate("orders", order_id)
+
+        cancel = run.start(
+            "POST",
+            f"/api/v1/orders/{order_id}/items/{burger_id}/cancel",
+            json={"reason": "Out of stock"},
+            headers=live.headers(),
+        )
+        cancel_pid = run.wait_for_new_backend_blocked_by(gate.pid, set())
+
+        start = run.start(
+            "POST",
+            f"/api/v1/preparations/{preparation_id}/start",
+            headers=live.headers(),
+        )
+        run.wait_for_new_backend_blocked_by({gate.pid, cancel_pid}, {cancel_pid})
+
+        gate.release()
+        cancelled, started = results(cancel, start)
+
+    assert cancelled.status_code == 200
+    assert started.status_code == 409
+    assert started.json()["error"]["code"] == "INVALID_PREPARATION_TRANSITION"
+    assert live.scalar(
+        "SELECT status FROM preparations WHERE id = :p", p=preparation_id
+    ) == "CANCELLED"
+    assert live.events("preparation.started") == 0

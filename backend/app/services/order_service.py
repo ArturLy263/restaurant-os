@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError, ErrorCode
+from app.core.permissions import Permission
 from app.db.models.bill import Bill, BillAdjustment
 from app.db.models.category import Category
 from app.db.models.modifier import (
@@ -49,6 +50,25 @@ class OrderService:
             )
 
     @staticmethod
+    def _ensure_can_modify(
+        order: Order,
+        user_id: uuid.UUID,
+        can_modify_any_order: bool,
+    ) -> None:
+        """Only the order's creator may modify it, unless overridden.
+
+        The override (Permission.ORDERS_MANAGE_ALL, e.g. managers) lifts
+        only this rule; every state and financial rule still applies.
+        """
+
+        if order.user_id != user_id and not can_modify_any_order:
+            raise ApiError(
+                status_code=status.HTTP_403_FORBIDDEN,
+                code=ErrorCode.ORDER_ACCESS_DENIED,
+                message="You cannot modify this order",
+            )
+
+    @staticmethod
     def _apply_bill_adjustment(
         db: Session,
         bill: Bill,
@@ -87,6 +107,7 @@ class OrderService:
             metadata={
                 "adjustment_id": str(adjustment.id),
                 "order_id": str(order.id),
+                "order_created_by": str(order.user_id),
                 "order_item_id": str(item.id),
                 "type": adjustment.type,
                 "amount": str(adjustment.amount),
@@ -190,6 +211,8 @@ class OrderService:
         product_id: uuid.UUID,
         quantity: int,
         modifier_ids: list[uuid.UUID] | None = None,
+        *,
+        can_modify_any_order: bool = False,
     ) -> OrderItem:
 
         modifier_ids = modifier_ids or []
@@ -209,12 +232,7 @@ class OrderService:
                 message="Order not found",
             )
 
-        if order.user_id != user_id:
-            raise ApiError(
-                status_code=status.HTTP_403_FORBIDDEN,
-                code=ErrorCode.ORDER_ACCESS_DENIED,
-                message="You cannot modify this order",
-            )
+        OrderService._ensure_can_modify(order, user_id, can_modify_any_order)
 
         OrderService._ensure_order_accepts_items(order)
 
@@ -391,6 +409,7 @@ class OrderService:
 
         item_event_metadata = {
             "order_id": str(order.id),
+            "order_created_by": str(order.user_id),
             "product_id": str(product.id),
             "quantity": quantity,
             "unit_price": str(base_price),
@@ -446,6 +465,8 @@ class OrderService:
         restaurant_id: uuid.UUID,
         user_id: uuid.UUID,
         order_id: uuid.UUID,
+        *,
+        can_modify_any_order: bool = False,
     ) -> Order:
 
         # Lock the order so concurrent sends cannot both pick up the same
@@ -463,12 +484,7 @@ class OrderService:
                 message="Order not found",
             )
 
-        if order.user_id != user_id:
-            raise ApiError(
-                status_code=status.HTTP_403_FORBIDDEN,
-                code=ErrorCode.ORDER_ACCESS_DENIED,
-                message="You cannot modify this order",
-            )
+        OrderService._ensure_can_modify(order, user_id, can_modify_any_order)
 
         # An order is sent in rounds: each send picks up only the items
         # added since the previous one.
@@ -585,6 +601,7 @@ class OrderService:
             entity_id=order.id,
             user_id=user_id,
             metadata={
+                "order_created_by": str(order.user_id),
                 "items_count": len(sent_item_ids),
                 "item_ids": sent_item_ids,
                 "initial": is_initial_send,
@@ -605,6 +622,8 @@ class OrderService:
         order_id: uuid.UUID,
         item_id: uuid.UUID,
         reason: str,
+        *,
+        can_modify_any_order: bool = False,
     ) -> OrderItem:
         # Lock the order so the cancellation cannot race a send, a new
         # item or a payment on its bill.
@@ -636,13 +655,90 @@ class OrderService:
                 message="Cannot cancel items in a cancelled order",
             )
 
-        # Ensure the user is authorized (matches order creator like in other methods)
-        if order.user_id != user_id:
+        OrderService._ensure_can_modify(order, user_id, can_modify_any_order)
+
+        # An issued bill is a financial document: its items are cancelled
+        # through the bill (cancel_billed_item, Permission.BILLS_ADJUST),
+        # never as a side effect of this order endpoint.
+        if BillRepository(db).get_for_order(order.id) is not None:
             raise ApiError(
-                status_code=status.HTTP_403_FORBIDDEN,
-                code=ErrorCode.ORDER_ACCESS_DENIED,
-                message="You cannot modify this order",
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.ORDER_BILLED,
+                message=(
+                    "Order has a bill; cancel billed items through the bill"
+                ),
             )
+
+        return OrderService._cancel_item(
+            db=db,
+            order=order,
+            bill=None,
+            item_id=item_id,
+            reason=reason,
+            user_id=user_id,
+        )
+
+    @staticmethod
+    def cancel_billed_item(
+        db: Session,
+        restaurant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        bill_id: uuid.UUID,
+        item_id: uuid.UUID,
+        reason: str,
+    ) -> Bill:
+        """Cancel an item of an issued bill: the financial correction.
+
+        Records an ITEM_CANCELLATION adjustment on the bill (its original
+        total is unchanged), under the same bill rules as before: the bill
+        must be OPEN and unpaid. Not limited to the order's creator; the
+        caller needs Permission.BILLS_ADJUST.
+        """
+
+        bill = db.get(Bill, bill_id)
+        order = db.get(Order, bill.order_id) if bill is not None else None
+
+        # Another restaurant's bill is reported exactly like a missing one.
+        if order is None or order.restaurant_id != restaurant_id:
+            raise ApiError(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code=ErrorCode.BILL_NOT_FOUND,
+                message="Bill not found",
+            )
+
+        # Lock the order (and so its bill), then re-read the bill under the
+        # lock, as every other order and bill write does.
+        order = OrderRepository(db).get_for_restaurant(
+            order.id,
+            restaurant_id,
+            for_update=True,
+        )
+        bill = BillRepository(db).get_for_order(order.id)
+
+        OrderService._cancel_item(
+            db=db,
+            order=order,
+            bill=bill,
+            item_id=item_id,
+            reason=reason,
+            user_id=user_id,
+        )
+
+        db.refresh(bill)
+
+        return bill
+
+    @staticmethod
+    def _cancel_item(
+        db: Session,
+        order: Order,
+        bill: Bill | None,
+        item_id: uuid.UUID,
+        reason: str,
+        user_id: uuid.UUID,
+    ) -> OrderItem:
+        """Cancel an item of the locked `order`; adjusts `bill` if given."""
+
 
         # Load the item with its preparations
         item = (
@@ -686,10 +782,8 @@ class OrderService:
                     message=f"Cannot cancel item. Preparation is already {prep.status}",
                 )
 
-        # Once a bill exists, a cancellation must be recorded as a bill
-        # adjustment. Validate the bill before changing anything.
-        bill = BillRepository(db).get_for_order(order.id)
-
+        # With a bill, the cancellation is recorded as a bill adjustment.
+        # Validate the bill before changing anything.
         if bill is not None:
             if bill.status != "OPEN":
                 raise ApiError(
@@ -731,7 +825,7 @@ class OrderService:
 
                 EventService.record(
                     db=db,
-                    restaurant_id=restaurant_id,
+                    restaurant_id=order.restaurant_id,
                     event_type="preparation.cancelled",
                     entity_type="preparation",
                     entity_id=prep.id,
@@ -739,6 +833,8 @@ class OrderService:
                     metadata={
                         "status": "CANCELLED",
                         "order_item_id": str(item.id),
+                        "order_id": str(order.id),
+                        "order_created_by": str(order.user_id),
                         "previous_status": prep_previous_status,
                         "reason": reason,
                     },
@@ -746,6 +842,7 @@ class OrderService:
 
         item_event_metadata = {
             "order_id": str(order.id),
+            "order_created_by": str(order.user_id),
             "previous_status": previous_item_status,
             "reason": reason,
             "cancelled_preparations": cancelled_preps,
@@ -798,7 +895,7 @@ class OrderService:
 
         EventService.record(
             db=db,
-            restaurant_id=restaurant_id,
+            restaurant_id=order.restaurant_id,
             event_type="item.cancelled",
             entity_type="order_item",
             entity_id=item.id,
@@ -818,6 +915,9 @@ class OrderService:
         user_id: uuid.UUID,
         order_id: uuid.UUID,
         reason: str,
+        *,
+        can_modify_any_order: bool = False,
+        can_adjust_bills: bool = False,
     ) -> Order:
         """
         Explicitly cancel an order that has nothing left to bill.
@@ -855,12 +955,7 @@ class OrderService:
                 message="Order is already cancelled",
             )
 
-        if order.user_id != user_id:
-            raise ApiError(
-                status_code=status.HTTP_403_FORBIDDEN,
-                code=ErrorCode.ORDER_ACCESS_DENIED,
-                message="You cannot modify this order",
-            )
+        OrderService._ensure_can_modify(order, user_id, can_modify_any_order)
 
         active_items_count = sum(
             1
@@ -881,6 +976,14 @@ class OrderService:
         bill = BillRepository(db).get_for_order(order.id)
 
         if bill is not None:
+            # Voiding the order voids its bill, a financial document.
+            if not can_adjust_bills:
+                raise ApiError(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    code=ErrorCode.PERMISSION_DENIED,
+                    message=f"Missing permission: {Permission.BILLS_ADJUST}",
+                )
+
             if bill.status != "OPEN":
                 raise ApiError(
                     status_code=status.HTTP_409_CONFLICT,
@@ -918,6 +1021,7 @@ class OrderService:
                 user_id=user_id,
                 metadata={
                     "order_id": str(order.id),
+                    "order_created_by": str(order.user_id),
                     "original_total": str(bill.total),
                     "adjustments_total": str(bill.adjustments_total),
                     "adjusted_total": str(bill.adjusted_total),
@@ -941,6 +1045,7 @@ class OrderService:
             entity_id=order.id,
             user_id=user_id,
             metadata={
+                "order_created_by": str(order.user_id),
                 "previous_status": previous_status,
                 "bill_id": str(bill.id) if bill is not None else None,
                 "table_id": str(order.table_id),
@@ -982,14 +1087,15 @@ class OrderService:
     def update_preparation_status(
         db: Session,
         restaurant_id: uuid.UUID,
+        user_id: uuid.UUID,
         preparation_id: uuid.UUID,
         new_status: str,
     ) -> Preparation:
 
-        preparation = (
-            db.query(Preparation)
+        order_id = (
+            db.query(OrderItem.order_id)
             .join(
-                OrderItem,
+                Preparation,
                 Preparation.order_item_id == OrderItem.id,
             )
             .join(
@@ -1000,15 +1106,30 @@ class OrderService:
                 Preparation.id == preparation_id,
                 Order.restaurant_id == restaurant_id,
             )
-            .first()
+            .scalar()
         )
 
-        if not preparation:
+        if order_id is None:
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
                 code=ErrorCode.PREPARATION_NOT_FOUND,
                 message="Preparation not found",
             )
+
+        # Lock the order, as cancelling its items does, so a transition
+        # cannot race a cancellation (e.g. revive a CANCELLED preparation),
+        # then read the preparation's current status under the lock.
+        order = OrderRepository(db).get_for_restaurant(
+            order_id,
+            restaurant_id,
+            for_update=True,
+        )
+        preparation = (
+            db.query(Preparation)
+            .filter(Preparation.id == preparation_id)
+            .populate_existing()
+            .one()
+        )
 
         current_status = preparation.status
 
@@ -1074,11 +1195,14 @@ class OrderService:
             event_type=event_type,
             entity_type="preparation",
             entity_id=preparation.id,
+            user_id=user_id,
             metadata={
                 "status": new_status,
                 "order_item_id": str(
                     preparation.order_item_id
                 ),
+                "order_id": str(order.id),
+                "order_created_by": str(order.user_id),
             },
         )
 

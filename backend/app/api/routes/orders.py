@@ -4,7 +4,12 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from app.api.idempotency import IDEMPOTENT_ROUTE_RESPONSES, Idempotency
-from app.core.dependencies import get_current_user
+from app.core.dependencies import (
+    AuthContext,
+    get_auth_context,
+    require_permission,
+)
+from app.core.permissions import Permission
 from app.db.dependencies import get_db
 from app.db.models.user import User
 from app.schemas.order import (
@@ -34,7 +39,9 @@ router = APIRouter(
 def create_order(
     request: CreateOrderRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(
+        require_permission(Permission.ORDERS_CREATE)
+    ),
     idempotency: Idempotency = Depends(),
 ):
     return idempotency.run(
@@ -58,7 +65,10 @@ def add_order_item(
     order_id: uuid.UUID,
     request: AddOrderItemRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(
+        require_permission(Permission.ORDERS_ADD_ITEMS)
+    ),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     order_item = OrderService.add_order_item(
         db=db,
@@ -68,6 +78,9 @@ def add_order_item(
         product_id=request.product_id,
         quantity=request.quantity,
         modifier_ids=request.modifier_ids,
+        can_modify_any_order=(
+            Permission.ORDERS_MANAGE_ALL in auth.permissions
+        ),
     )
 
     return order_item
@@ -80,7 +93,10 @@ def add_order_item(
 def send_order(
     order_id: uuid.UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(
+        require_permission(Permission.ORDERS_SEND)
+    ),
+    auth: AuthContext = Depends(get_auth_context),
     idempotency: Idempotency = Depends(),
 ):
     return idempotency.run(
@@ -89,6 +105,9 @@ def send_order(
             restaurant_id=current_user.restaurant_id,
             user_id=current_user.id,
             order_id=order_id,
+            can_modify_any_order=(
+                Permission.ORDERS_MANAGE_ALL in auth.permissions
+            ),
         ),
     )
 
@@ -99,7 +118,9 @@ def send_order(
 def get_order(
     order_id: uuid.UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(
+        require_permission(Permission.ORDERS_VIEW)
+    ),
 ):
     order = OrderService.get_order(
         db=db,
@@ -118,7 +139,10 @@ def cancel_order_item(
     item_id: uuid.UUID,
     request: CancelOrderItemRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(
+        require_permission(Permission.ORDERS_CANCEL_ITEMS)
+    ),
+    auth: AuthContext = Depends(get_auth_context),
     idempotency: Idempotency = Depends(),
 ):
     return idempotency.run(
@@ -129,6 +153,9 @@ def cancel_order_item(
             order_id=order_id,
             item_id=item_id,
             reason=request.reason,
+            can_modify_any_order=(
+                Permission.ORDERS_MANAGE_ALL in auth.permissions
+            ),
         ),
         payload=request,
     )
@@ -143,7 +170,10 @@ def void_order(
     order_id: uuid.UUID,
     request: VoidOrderRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(
+        require_permission(Permission.ORDERS_VOID)
+    ),
+    auth: AuthContext = Depends(get_auth_context),
     idempotency: Idempotency = Depends(),
 ):
     return idempotency.run(
@@ -153,6 +183,10 @@ def void_order(
             user_id=current_user.id,
             order_id=order_id,
             reason=request.reason,
+            can_modify_any_order=(
+                Permission.ORDERS_MANAGE_ALL in auth.permissions
+            ),
+            can_adjust_bills=Permission.BILLS_ADJUST in auth.permissions,
         ),
         payload=request,
     )

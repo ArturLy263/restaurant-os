@@ -3,7 +3,8 @@ import uuid
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.core.dependencies import get_current_user
+from app.core.dependencies import require_permission
+from app.core.permissions import Permission
 from app.db.dependencies import get_db
 from app.db.models.user import User
 from app.schemas.kitchen import PreparationQueueItem
@@ -23,7 +24,9 @@ router = APIRouter(
 def get_station_preparations(
     station_id: uuid.UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(
+        require_permission(Permission.PREPARATIONS_VIEW)
+    ),
 ):
     return OrderService.get_station_preparations(
         db=db,

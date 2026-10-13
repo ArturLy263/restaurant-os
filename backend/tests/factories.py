@@ -1,4 +1,6 @@
+import uuid
 from decimal import Decimal
+from functools import cache
 from types import SimpleNamespace
 
 from sqlalchemy.orm import Session
@@ -100,3 +102,39 @@ def auth_headers(user: User) -> dict[str, str]:
     )
 
     return {"Authorization": f"Bearer {token}"}
+
+
+def create_user(db: Session, restaurant, role_name: str) -> User:
+    """A user of `restaurant` with a (new or existing) role `role_name`."""
+
+    role = (
+        db.query(Role)
+        .filter(
+            Role.restaurant_id == restaurant.restaurant.id,
+            Role.name == role_name,
+        )
+        .first()
+    )
+
+    if role is None:
+        role = Role(restaurant_id=restaurant.restaurant.id, name=role_name)
+        db.add(role)
+        db.flush()
+
+    user = User(
+        restaurant_id=restaurant.restaurant.id,
+        role_id=role.id,
+        name=f"{role_name.title()} User",
+        email=f"{role_name.lower()}-{uuid.uuid4()}@example.com",
+        password_hash=_test_password_hash(),
+    )
+    db.add(user)
+    db.flush()
+
+    return user
+
+
+@cache
+def _test_password_hash() -> str:
+    # bcrypt is deliberately slow; one hash serves every test user.
+    return hash_password(TEST_USER_PASSWORD)

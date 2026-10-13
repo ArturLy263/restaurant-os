@@ -16,8 +16,7 @@ import app.services.order_service as order_service
 from app.db.models.preparation import Preparation
 from app.db.models.product import Product
 from app.db.models.station import Station
-from app.db.models.user import User
-from tests.factories import auth_headers, create_restaurant
+from tests.factories import auth_headers, create_restaurant, create_user
 
 
 @pytest.fixture
@@ -289,6 +288,7 @@ def test_item_added_after_bill_records_events(pos):
     assert bill_event.event_metadata == {
         "adjustment_id": str(adjustment.id),
         "order_id": order_id,
+        "order_created_by": str(pos.restaurant.user.id),
         "order_item_id": new_id,
         "type": "ITEM_ADDITION",
         "amount": "12.50",
@@ -358,7 +358,7 @@ def test_cancelling_added_item_offsets_addition(pos):
     order_id, _, _, bill_id = pos.billed_order()
     new_id = added(pos, order_id, pos.burger)
 
-    assert pos.cancel(order_id, new_id).status_code == 200
+    assert pos.cancel_billed(bill_id, new_id).status_code == 200
 
     assert sorted(
         (adjustment.type, adjustment.amount)
@@ -422,7 +422,7 @@ def test_added_item_cannot_be_cancelled_after_partial_payment(pos):
     new_id = added(pos, order_id, pos.burger)
     assert pos.pay(bill_id, "5.00").status_code == 201
 
-    response = pos.cancel(order_id, new_id)
+    response = pos.cancel_billed(bill_id, new_id)
 
     assert response.status_code == 409
     assert response.json()["detail"] == (
@@ -513,7 +513,7 @@ def test_cancelling_unsent_item_allows_final_payment(pos):
     order_id, _, _, bill_id = pos.billed_order()
     new_id = added(pos, order_id, pos.burger)
 
-    assert pos.cancel(order_id, new_id).status_code == 200
+    assert pos.cancel_billed(bill_id, new_id).status_code == 200
     assert pos.pay(bill_id, "15.00").status_code == 201
 
     assert pos.bill(bill_id).status == "PAID"
@@ -537,8 +537,8 @@ def test_cannot_add_item_to_closed_order(pos):
 
 def test_cannot_add_item_to_cancelled_order_with_void_bill(pos):
     order_id, burger_id, coke_id, bill_id = pos.billed_order()
-    assert pos.cancel(order_id, burger_id).status_code == 200
-    assert pos.cancel(order_id, coke_id).status_code == 200
+    assert pos.cancel_billed(bill_id, burger_id).status_code == 200
+    assert pos.cancel_billed(bill_id, coke_id).status_code == 200
     assert pos.void(order_id).status_code == 200
 
     response = pos.add_item(order_id, pos.burger)
@@ -598,15 +598,8 @@ def test_other_restaurant_cannot_add_or_send(pos, db_session):
 
 def test_other_user_cannot_add_to_sent_order(pos, db_session):
     order_id, _, _ = pos.sent_order()
-    colleague = User(
-        restaurant_id=pos.restaurant.restaurant.id,
-        role_id=pos.restaurant.role.id,
-        name="Colleague",
-        email=f"colleague-{pos.restaurant.restaurant.id}@example.com",
-        password_hash="unused",
-    )
-    db_session.add(colleague)
-    db_session.flush()
+    # Another waiter: the creator-only rule applies to them.
+    colleague = create_user(db_session, pos.restaurant, "WAITER")
 
     response = pos.client.post(
         f"/api/v1/orders/{order_id}/items",

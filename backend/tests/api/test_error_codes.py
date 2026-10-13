@@ -6,12 +6,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.request_id import REQUEST_ID_HEADER
-from app.core.security import hash_password
 from app.db.models.order import Order
-from app.db.models.user import User
 from app.main import app
 from app.services.order_service import OrderService
-from tests.factories import auth_headers
+from tests.factories import auth_headers, create_user
 
 
 def assert_error(response, status_code, code, detail=None):
@@ -87,15 +85,8 @@ def test_cancel_twice(pos):
 
 def test_other_users_order(pos, db_session):
     order_id, *_ = pos.open_order()
-    colleague = User(
-        restaurant_id=pos.restaurant.restaurant.id,
-        role_id=pos.restaurant.role.id,
-        name="Colleague",
-        email=f"colleague-{uuid.uuid4()}@example.com",
-        password_hash=hash_password("colleague-password"),
-    )
-    db_session.add(colleague)
-    db_session.flush()
+    # Another waiter: the creator-only rule applies to them.
+    colleague = create_user(db_session, pos.restaurant, "WAITER")
 
     response = pos.client.post(
         f"/api/v1/orders/{order_id}/send",

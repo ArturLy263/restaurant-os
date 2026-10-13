@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from app.db.models.bill import Bill
 from app.services.bill_service import BillService
+from app.services.order_service import OrderService
 from tests.factories import create_order
 from tests.locking import assert_waits_for_order_lock
 
@@ -35,6 +36,7 @@ def _pay(db_session, restaurant, bill, amount):
     return BillService.create_payment(
         db=db_session,
         restaurant_id=restaurant.restaurant.id,
+        user_id=restaurant.user.id,
         bill_id=bill.id,
         amount=Decimal(amount),
         method="CASH",
@@ -87,17 +89,27 @@ def test_payment_rechecks_amount_due_after_taking_lock(
         lambda db, ids: BillService.create_bill(
             db=db,
             restaurant_id=ids.restaurant_id,
+            user_id=ids.user_id,
             order_id=ids.order_id,
         ),
         lambda db, ids: BillService.create_payment(
             db=db,
             restaurant_id=ids.restaurant_id,
+            user_id=ids.user_id,
             bill_id=ids.bill_id,
             amount=Decimal("1.00"),
             method="CASH",
         ),
+        lambda db, ids: OrderService.cancel_billed_item(
+            db=db,
+            restaurant_id=ids.restaurant_id,
+            user_id=ids.user_id,
+            bill_id=ids.bill_id,
+            item_id=uuid.uuid4(),
+            reason="Lock test",
+        ),
     ],
-    ids=["create_bill", "create_payment"],
+    ids=["create_bill", "create_payment", "cancel_billed_item"],
 )
 def test_bill_writes_wait_for_order_row_lock(
     db_engine,

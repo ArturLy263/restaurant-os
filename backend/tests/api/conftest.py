@@ -73,6 +73,15 @@ class Pos:
             headers=self.headers,
         )
 
+    def cancel_billed(self, bill_id, item_id, reason="Customer changed mind"):
+        """Cancel an item of an issued bill (the financial correction)."""
+
+        return self.client.post(
+            f"/api/v1/bills/{bill_id}/items/{item_id}/cancel",
+            json={"reason": reason},
+            headers=self.headers,
+        )
+
     def void(self, order_id, reason="Nothing left to bill"):
         return self.client.post(
             f"/api/v1/orders/{order_id}/void",

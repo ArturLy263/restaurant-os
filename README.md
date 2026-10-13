@@ -147,10 +147,91 @@ Every error response, whatever its status, has the same body:
   characters from `A-Z a-z 0-9 . _ : -`); anything else is replaced by a
   generated ID.
 
-Status codes are unchanged: 400/422 for invalid input, 401 for missing or
-invalid credentials, 403 for other users' or other restaurants'
-resources, 404 for missing ones, 409 when the current state forbids the
-operation.
+Status codes: 400/422 for invalid input, 401 for missing or invalid
+credentials, 403 when the user's role lacks the permission
+(`PERMISSION_DENIED`) or the order belongs to another user, 404 for
+missing resources and for other restaurants' resources, 409 when the
+current state forbids the operation.
+
+### Roles and permissions
+
+Every endpoint except `POST /api/v1/auth/login`, `GET /health` and
+`GET /api/v1/me` requires a permission, checked on the backend for each
+request. A user's permissions come from their role: the `roles` row of
+their restaurant whose `name` is one of the codes below (exact, upper
+case). The role is read from the database on every request, so changing a
+user's role takes effect without a new token.
+
+| Permission | Endpoints | WAITER | KITCHEN | BAR | CASHIER | MANAGER, ADMIN |
+| --- | --- | :-: | :-: | :-: | :-: | :-: |
+| `orders:create` | `POST /orders` | ✓ | | | | ✓ |
+| `orders:add_items` | `POST /orders/{id}/items` | ✓ | | | | ✓ |
+| `orders:send` | `POST /orders/{id}/send` | ✓ | | | | ✓ |
+| `orders:view` | `GET /orders/{id}` | ✓ | | | ✓ | ✓ |
+| `orders:cancel_items` | `POST /orders/{id}/items/{item_id}/cancel` (unbilled items) | ✓ | | | | ✓ |
+| `orders:void` | `POST /orders/{id}/void` | ✓ | | | | ✓ |
+| `orders:manage_all` | modify orders created by others (see below) | | | | | ✓ |
+| `preparations:view` | `GET /stations/{id}/preparations` | | ✓ | ✓ | | ✓ |
+| `preparations:update` | `POST /preparations/{id}/start`, `/ready` | | ✓ | ✓ | | ✓ |
+| `preparations:serve` | `POST /preparations/{id}/serve` | ✓ | ✓ | ✓ | | ✓ |
+| `bills:create` | `POST /bills/order/{order_id}` | | | | ✓ | ✓ |
+| `bills:adjust` | `POST /bills/{id}/items/{item_id}/cancel`; voiding a billed order | | | | ✓ | ✓ |
+| `bills:view` | `GET /bills/{id}` | | | | ✓ | ✓ |
+| `payments:create` | `POST /bills/{id}/payments` | | | | ✓ | ✓ |
+| `events:view` | `GET /events` | | | | | ✓ |
+| `menu:manage`, `tables:manage` | none yet | | | | | ✓ |
+
+(Paths are under `/api/v1`.) `ADMIN` is the administrator role created by
+`seed.py`; it has every permission, like `MANAGER`. The policy lives in
+`backend/app/core/permissions.py`.
+
+- A missing permission is 403 `PERMISSION_DENIED`
+  (`"Missing permission: payments:create"`). It is checked before the
+  endpoint looks anything up, so it reveals nothing about the resource.
+- A role name that is not listed (e.g. `SOMMELIER` or `waiter`), or a role
+  of another restaurant, grants no permissions.
+- Adding items to, sending, cancelling items of and voiding an order is
+  limited to the user who created it (403 `ORDER_ACCESS_DENIED`), unless
+  the user has `orders:manage_all` (managers). Viewing is not: any user
+  with `orders:view` sees every order of the restaurant. The override only
+  lifts the creator rule; every state and financial rule still applies.
+- Once an order has a bill, its items are cancelled only through the
+  bill: `POST /bills/{bill_id}/items/{item_id}/cancel` (`bills:adjust`)
+  records an `ITEM_CANCELLATION` adjustment; the bill's original total
+  never changes, and the bill must be open and unpaid, as before. The
+  order endpoint answers 409 `ORDER_BILLED` for billed orders, for every
+  role, so it can never change an issued bill. Voiding an order that has
+  a bill (which voids the bill) also requires `bills:adjust`, so in
+  practice a manager.
+- Preparations move `PENDING → IN_PROGRESS → READY → SERVED`; anything
+  else is 409 `INVALID_PREPARATION_TRANSITION`. Waiters may only serve
+  (`READY → SERVED`). Transitions lock the order, like cancellations, so
+  a cancelled preparation cannot be revived.
+- Audit events record the user who acted (`user_id`); events about an
+  order also record its creator as `order_created_by` in their metadata.
+- Another restaurant's orders, bills, stations and preparations are
+  reported exactly like missing ones (404), never as 403.
+- Kitchen and bar users are not yet limited to their own stations.
+
+There is no API to manage roles or users yet; `seed.py` creates only the
+`ADMIN` role. Other roles are `roles` rows with the codes above.
+
+`GET /api/v1/me` returns the authenticated user, for clients deciding what
+to show:
+
+```json
+{
+  "id": "6c1e…",
+  "name": "Ana",
+  "email": "ana@example.com",
+  "restaurant_id": "0f3a…",
+  "role": {"id": "9d2b…", "name": "CASHIER"},
+  "permissions": ["bills:create", "bills:view", "orders:view", "payments:create"]
+}
+```
+
+`role` is `null` if the user's role belongs to another restaurant;
+`permissions` is empty for an unrecognized role.
 
 ### Idempotency keys
 
@@ -160,7 +241,8 @@ These mutations accept an `Idempotency-Key` header:
 | --- | --- |
 | Open an order for a table | `POST /api/v1/orders` |
 | Send an order's new items | `POST /api/v1/orders/{order_id}/send` |
-| Cancel an order item | `POST /api/v1/orders/{order_id}/items/{item_id}/cancel` |
+| Cancel an order item (no bill yet) | `POST /api/v1/orders/{order_id}/items/{item_id}/cancel` |
+| Cancel a billed item (bill adjustment) | `POST /api/v1/bills/{bill_id}/items/{item_id}/cancel` |
 | Void (cancel) an order | `POST /api/v1/orders/{order_id}/void` |
 | Take a payment (closes the order when fully paid) | `POST /api/v1/bills/{bill_id}/payments` |
 

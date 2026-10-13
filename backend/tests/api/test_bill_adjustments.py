@@ -39,10 +39,12 @@ def test_cancel_before_bill_creates_no_adjustment(pos):
 def test_cancel_after_bill_records_negative_adjustment(pos):
     order_id, burger_id, _, bill_id = pos.billed_order()
 
-    response = pos.cancel(order_id, burger_id, reason="Burger was cold")
+    response = pos.cancel_billed(bill_id, burger_id, reason="Burger was cold")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "CANCELLED"
+    assert response.json()["id"] == bill_id
+    assert response.json()["adjustments_total"] == "-12.50"
+    assert response.json()["amount_due"] == "2.50"
     assert pos.item(burger_id).status == "CANCELLED"
     assert pos.preparation(burger_id).status == "CANCELLED"
 
@@ -59,7 +61,7 @@ def test_cancel_after_bill_records_negative_adjustment(pos):
 def test_cancel_after_bill_preserves_original_total(pos):
     order_id, burger_id, _, bill_id = pos.billed_order()
 
-    assert pos.cancel(order_id, burger_id).status_code == 200
+    assert pos.cancel_billed(bill_id, burger_id).status_code == 200
 
     bill = pos.bill(bill_id)
     assert bill.subtotal == Decimal("15.00")
@@ -74,7 +76,7 @@ def test_cancel_after_bill_preserves_original_total(pos):
 def test_bill_response_exposes_adjusted_amounts(pos):
     order_id, burger_id, _, bill_id = pos.billed_order()
 
-    assert pos.cancel(order_id, burger_id).status_code == 200
+    assert pos.cancel_billed(bill_id, burger_id).status_code == 200
 
     response = pos.get_bill(bill_id)
 
@@ -99,7 +101,7 @@ def test_bill_response_exposes_adjusted_amounts(pos):
 def test_repeated_bill_creation_returns_adjusted_bill(pos):
     order_id, burger_id, _, bill_id = pos.billed_order()
 
-    assert pos.cancel(order_id, burger_id).status_code == 200
+    assert pos.cancel_billed(bill_id, burger_id).status_code == 200
 
     response = pos.create_bill(order_id)
 
@@ -112,7 +114,7 @@ def test_repeated_bill_creation_returns_adjusted_bill(pos):
 def test_cancel_one_item_from_multi_item_bill(pos):
     order_id, _, coke_id, bill_id = pos.billed_order()
 
-    assert pos.cancel(order_id, coke_id).status_code == 200
+    assert pos.cancel_billed(bill_id, coke_id).status_code == 200
 
     bill = pos.bill(bill_id)
     assert bill.adjustments_total == Decimal("-2.50")
@@ -124,8 +126,8 @@ def test_cancel_one_item_from_multi_item_bill(pos):
 def test_cancel_every_item_after_bill_reaches_zero_due(pos):
     order_id, burger_id, coke_id, bill_id = pos.billed_order()
 
-    assert pos.cancel(order_id, burger_id).status_code == 200
-    assert pos.cancel(order_id, coke_id).status_code == 200
+    assert pos.cancel_billed(bill_id, burger_id).status_code == 200
+    assert pos.cancel_billed(bill_id, coke_id).status_code == 200
 
     bill = pos.bill(bill_id)
     assert len(bill.adjustments) == 2
@@ -140,7 +142,7 @@ def test_cancel_in_progress_item_after_bill_is_allowed(pos):
     order_id, burger_id, _, bill_id = pos.billed_order()
     pos.start_preparation(burger_id, "start")
 
-    response = pos.cancel(order_id, burger_id)
+    response = pos.cancel_billed(bill_id, burger_id)
 
     assert response.status_code == 200
     assert pos.preparation(burger_id).status == "CANCELLED"
@@ -161,7 +163,7 @@ def test_cancel_ready_or_served_item_after_bill_is_rejected(
     order_id, burger_id, _, bill_id = pos.billed_order()
     pos.start_preparation(burger_id, *actions)
 
-    response = pos.cancel(order_id, burger_id)
+    response = pos.cancel_billed(bill_id, burger_id)
 
     assert response.status_code == 409
     assert prep_status in response.json()["detail"]
@@ -176,7 +178,7 @@ def test_cancel_after_partial_payment_is_rejected(pos):
     order_id, burger_id, _, bill_id = pos.billed_order()
     assert pos.pay(bill_id, "10.00").status_code == 201
 
-    response = pos.cancel(order_id, burger_id)
+    response = pos.cancel_billed(bill_id, burger_id)
 
     assert response.status_code == 409
     assert response.json()["detail"] == (
@@ -210,7 +212,7 @@ def test_cancel_after_full_payment_is_rejected(pos):
 
 def test_cancel_on_closed_order_is_rejected(pos):
     order_id, burger_id, coke_id, bill_id = pos.billed_order()
-    assert pos.cancel(order_id, burger_id).status_code == 200
+    assert pos.cancel_billed(bill_id, burger_id).status_code == 200
     assert pos.pay(bill_id, "2.50").status_code == 201
     assert pos.order(order_id).status == "CLOSED"
 
@@ -224,12 +226,12 @@ def test_cancel_on_closed_order_is_rejected(pos):
 
 def test_cancel_on_void_bill_is_rejected(pos):
     order_id, burger_id, coke_id, bill_id = pos.billed_order()
-    assert pos.cancel(order_id, burger_id).status_code == 200
-    assert pos.cancel(order_id, coke_id).status_code == 200
+    assert pos.cancel_billed(bill_id, burger_id).status_code == 200
+    assert pos.cancel_billed(bill_id, coke_id).status_code == 200
     assert pos.void(order_id).status_code == 200
     assert pos.bill(bill_id).status == "VOID"
 
-    response = pos.cancel(order_id, burger_id)
+    response = pos.cancel_billed(bill_id, burger_id)
 
     assert response.status_code == 409
     assert len(pos.adjustments(bill_id)) == 2
@@ -238,8 +240,8 @@ def test_cancel_on_void_bill_is_rejected(pos):
 def test_duplicate_cancellation_creates_one_adjustment(pos):
     order_id, burger_id, _, bill_id = pos.billed_order()
 
-    first = pos.cancel(order_id, burger_id)
-    second = pos.cancel(order_id, burger_id)
+    first = pos.cancel_billed(bill_id, burger_id)
+    second = pos.cancel_billed(bill_id, burger_id)
 
     assert first.status_code == 200
     assert second.status_code == 409
@@ -253,7 +255,7 @@ def test_duplicate_cancellation_creates_one_adjustment(pos):
 
 def test_paying_adjusted_amount_closes_bill_order_and_table(pos):
     order_id, burger_id, _, bill_id = pos.billed_order()
-    assert pos.cancel(order_id, burger_id).status_code == 200
+    assert pos.cancel_billed(bill_id, burger_id).status_code == 200
 
     response = pos.pay(bill_id, "2.50")
 
@@ -278,7 +280,7 @@ def test_paying_adjusted_amount_closes_bill_order_and_table(pos):
 @pytest.mark.parametrize("amount", ["2.51", "15.00"])
 def test_payment_cannot_exceed_adjusted_amount_due(pos, amount):
     order_id, burger_id, _, bill_id = pos.billed_order()
-    assert pos.cancel(order_id, burger_id).status_code == 200
+    assert pos.cancel_billed(bill_id, burger_id).status_code == 200
 
     response = pos.pay(bill_id, amount)
 
@@ -290,7 +292,7 @@ def test_payment_cannot_exceed_adjusted_amount_due(pos, amount):
 
 def test_partial_payment_of_adjusted_amount_keeps_bill_open(pos):
     order_id, _, coke_id, bill_id = pos.billed_order()
-    assert pos.cancel(order_id, coke_id).status_code == 200
+    assert pos.cancel_billed(bill_id, coke_id).status_code == 200
 
     assert pos.pay(bill_id, "10.00").status_code == 201
 
@@ -308,7 +310,7 @@ def test_partial_payment_of_adjusted_amount_keeps_bill_open(pos):
 def test_cancellation_after_bill_records_events(pos):
     order_id, burger_id, _, bill_id = pos.billed_order()
 
-    assert pos.cancel(order_id, burger_id, reason="Wrong order").status_code == 200
+    assert pos.cancel_billed(bill_id, burger_id, reason="Wrong order").status_code == 200
 
     [adjustment] = pos.adjustments(bill_id)
 
@@ -318,6 +320,7 @@ def test_cancellation_after_bill_records_events(pos):
     assert bill_event.event_metadata == {
         "adjustment_id": str(adjustment.id),
         "order_id": order_id,
+        "order_created_by": str(pos.restaurant.user.id),
         "order_item_id": burger_id,
         "type": "ITEM_CANCELLATION",
         "amount": "-12.50",
@@ -358,7 +361,7 @@ def test_failed_adjustment_does_not_commit_cancellation(pos, monkeypatch):
     monkeypatch.setattr(order_service, "BillAdjustment", fail)
 
     with pytest.raises(RuntimeError, match="adjustment creation failed"):
-        pos.cancel(order_id, burger_id)
+        pos.cancel_billed(bill_id, burger_id)
 
     # The request never committed; its session is discarded on error,
     # just as the real get_db dependency closes (rolls back) the session.
@@ -391,7 +394,7 @@ def test_unique_index_backstop_rolls_back_cancellation(pos):
     )
     pos.db.commit()
 
-    response = pos.cancel(order_id, burger_id)
+    response = pos.cancel_billed(bill_id, burger_id)
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Order item is already cancelled"
@@ -447,7 +450,7 @@ def test_unrelated_integrity_error_is_not_reported_as_duplicate(
         IntegrityError,
         match="ck_bill_adjustments_amount_nonzero",
     ):
-        pos.cancel(order_id, burger_id)
+        pos.cancel_billed(bill_id, burger_id)
 
     # The service rolled back before re-raising.
     assert pos.item(burger_id).status == "SENT"
@@ -488,10 +491,10 @@ def billed_burger_and_water(pos, water):
 def test_cancel_zero_priced_item_after_bill(pos, billed_burger_and_water):
     order_id, _, water_id, bill_id = billed_burger_and_water
 
-    response = pos.cancel(order_id, water_id)
+    response = pos.cancel_billed(bill_id, water_id)
 
     assert response.status_code == 200
-    assert response.json()["status"] == "CANCELLED"
+    assert response.json()["amount_due"] == "12.50"
     assert pos.item(water_id).status == "CANCELLED"
     assert pos.item(water_id).cancelled_at is not None
     assert pos.preparation(water_id).status == "CANCELLED"
@@ -518,8 +521,8 @@ def test_order_with_cancelled_zero_priced_item_can_be_voided(
 ):
     order_id, burger_id, water_id, bill_id = billed_burger_and_water
 
-    assert pos.cancel(order_id, water_id).status_code == 200
-    assert pos.cancel(order_id, burger_id).status_code == 200
+    assert pos.cancel_billed(bill_id, water_id).status_code == 200
+    assert pos.cancel_billed(bill_id, burger_id).status_code == 200
 
     [adjustment] = pos.adjustments(bill_id)
     assert adjustment.amount == Decimal("-12.50")
@@ -540,7 +543,7 @@ def test_paying_after_cancelling_zero_priced_item(
 ):
     order_id, _, water_id, bill_id = billed_burger_and_water
 
-    assert pos.cancel(order_id, water_id).status_code == 200
+    assert pos.cancel_billed(bill_id, water_id).status_code == 200
 
     assert pos.pay(bill_id, "12.50").status_code == 201
     assert pos.bill(bill_id).status == "PAID"

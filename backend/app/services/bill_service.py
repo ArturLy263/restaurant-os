@@ -21,23 +21,19 @@ class BillService:
     def create_bill(
         db: Session,
         restaurant_id: uuid.UUID,
+        user_id: uuid.UUID,
         order_id: uuid.UUID,
     ) -> Bill:
 
         order = db.get(Order, order_id)
 
-        if order is None:
+        # Another restaurant's order is reported exactly like a missing one,
+        # so its existence is not revealed.
+        if order is None or order.restaurant_id != restaurant_id:
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
                 code=ErrorCode.ORDER_NOT_FOUND,
                 message="Order not found",
-            )
-
-        if order.restaurant_id != restaurant_id:
-            raise ApiError(
-                status_code=status.HTTP_403_FORBIDDEN,
-                code=ErrorCode.TENANT_ACCESS_DENIED,
-                message="Order does not belong to this restaurant",
             )
 
         # Lock the order so items cannot be added or cancelled while the
@@ -91,12 +87,13 @@ class BillService:
         EventService.record(
             db=db,
             restaurant_id=restaurant_id,
-            user_id=order.user_id,
+            user_id=user_id,
             event_type="bill.created",
             entity_type="bill",
             entity_id=bill.id,
             metadata={
                 "order_id": str(order.id),
+                "order_created_by": str(order.user_id),
                 "subtotal": str(subtotal),
                 "total": str(subtotal),
             },
@@ -111,6 +108,7 @@ class BillService:
     def create_payment(
         db: Session,
         restaurant_id: uuid.UUID,
+        user_id: uuid.UUID,
         bill_id: uuid.UUID,
         amount: Decimal,
         method: str,
@@ -134,11 +132,13 @@ class BillService:
                 message="Order not found",
             )
 
+        # Another restaurant's bill is reported exactly like a missing one,
+        # so its existence is not revealed.
         if order.restaurant_id != restaurant_id:
             raise ApiError(
-                status_code=status.HTTP_403_FORBIDDEN,
-                code=ErrorCode.TENANT_ACCESS_DENIED,
-                message="Bill does not belong to this restaurant",
+                status_code=status.HTTP_404_NOT_FOUND,
+                code=ErrorCode.BILL_NOT_FOUND,
+                message="Bill not found",
             )
 
         # Lock the order (and so its bill) before checking the balance, so
@@ -215,13 +215,14 @@ class BillService:
         EventService.record(
             db=db,
             restaurant_id=restaurant_id,
-            user_id=order.user_id,
+            user_id=user_id,
             event_type="payment.completed",
             entity_type="payment",
             entity_id=payment.id,
             metadata={
                 "bill_id": str(bill.id),
                 "order_id": str(order.id),
+                "order_created_by": str(order.user_id),
                 "amount": str(amount),
                 "method": method,
             },
@@ -246,12 +247,13 @@ class BillService:
             EventService.record(
                 db=db,
                 restaurant_id=restaurant_id,
-                user_id=order.user_id,
+                user_id=user_id,
                 event_type="order.closed",
                 entity_type="order",
                 entity_id=order.id,
                 metadata={
                     "bill_id": str(bill.id),
+                    "order_created_by": str(order.user_id),
                     "total_paid": str(new_paid_amount),
                 },
             )
@@ -286,11 +288,13 @@ class BillService:
                 message="Order not found",
             )
 
+        # Another restaurant's bill is reported exactly like a missing one,
+        # so its existence is not revealed.
         if order.restaurant_id != restaurant_id:
             raise ApiError(
-                status_code=status.HTTP_403_FORBIDDEN,
-                code=ErrorCode.TENANT_ACCESS_DENIED,
-                message="Bill does not belong to this restaurant",
+                status_code=status.HTTP_404_NOT_FOUND,
+                code=ErrorCode.BILL_NOT_FOUND,
+                message="Bill not found",
             )
 
         return bill

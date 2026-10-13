@@ -11,9 +11,16 @@ import pytest
 from app.db.models.bill import Bill, Payment
 
 
-def cancel_all(pos, order_id, *item_ids):
+def cancel_all(pos, order_id, *item_ids, bill_id=None):
+    """Cancel items; through the bill once one has been issued."""
+
     for item_id in item_ids:
-        assert pos.cancel(order_id, item_id).status_code == 200
+        if bill_id is None:
+            response = pos.cancel(order_id, item_id)
+        else:
+            response = pos.cancel_billed(bill_id, item_id)
+
+        assert response.status_code == 200
 
 
 # --- Bill creation with nothing billable ---
@@ -91,7 +98,7 @@ def test_table_can_be_reused_after_void(pos):
 
 def test_void_order_with_zero_balance_bill(pos):
     order_id, burger_id, coke_id, bill_id = pos.billed_order()
-    cancel_all(pos, order_id, burger_id, coke_id)
+    cancel_all(pos, order_id, burger_id, coke_id, bill_id=bill_id)
 
     response = pos.void(order_id, reason="Guest left")
 
@@ -113,7 +120,7 @@ def test_void_order_with_zero_balance_bill(pos):
 
 def test_void_preserves_bill_history(pos):
     order_id, burger_id, coke_id, bill_id = pos.billed_order()
-    cancel_all(pos, order_id, burger_id, coke_id)
+    cancel_all(pos, order_id, burger_id, coke_id, bill_id=bill_id)
 
     assert pos.void(order_id).status_code == 200
 
@@ -135,7 +142,7 @@ def test_void_preserves_bill_history(pos):
 
 def test_void_bill_cannot_be_paid(pos):
     order_id, burger_id, coke_id, bill_id = pos.billed_order()
-    cancel_all(pos, order_id, burger_id, coke_id)
+    cancel_all(pos, order_id, burger_id, coke_id, bill_id=bill_id)
     assert pos.void(order_id).status_code == 200
 
     response = pos.pay(bill_id, "0.01")
@@ -187,7 +194,7 @@ def test_void_with_paid_bill_is_rejected(pos):
 
 def test_void_closed_order_is_rejected(pos):
     order_id, burger_id, _, bill_id = pos.billed_order()
-    assert pos.cancel(order_id, burger_id).status_code == 200
+    assert pos.cancel_billed(bill_id, burger_id).status_code == 200
     assert pos.pay(bill_id, "2.50").status_code == 201
 
     response = pos.void(order_id)
@@ -200,7 +207,7 @@ def test_void_closed_order_is_rejected(pos):
 
 def test_void_twice_is_rejected(pos):
     order_id, burger_id, coke_id, bill_id = pos.billed_order()
-    cancel_all(pos, order_id, burger_id, coke_id)
+    cancel_all(pos, order_id, burger_id, coke_id, bill_id=bill_id)
     assert pos.void(order_id).status_code == 200
 
     response = pos.void(order_id)
@@ -241,7 +248,7 @@ def test_cancelled_order_rejects_further_changes(pos):
 
 def test_void_records_events(pos):
     order_id, burger_id, coke_id, bill_id = pos.billed_order()
-    cancel_all(pos, order_id, burger_id, coke_id)
+    cancel_all(pos, order_id, burger_id, coke_id, bill_id=bill_id)
 
     assert pos.void(order_id, reason="Guest left").status_code == 200
 
@@ -250,6 +257,7 @@ def test_void_records_events(pos):
     assert bill_event.user_id == pos.restaurant.user.id
     assert bill_event.event_metadata == {
         "order_id": order_id,
+        "order_created_by": str(pos.restaurant.user.id),
         "original_total": "15.00",
         "adjustments_total": "-15.00",
         "adjusted_total": "0.00",
@@ -260,6 +268,7 @@ def test_void_records_events(pos):
     assert str(order_event.entity_id) == order_id
     assert order_event.user_id == pos.restaurant.user.id
     assert order_event.event_metadata == {
+        "order_created_by": str(pos.restaurant.user.id),
         "previous_status": "SENT",
         "bill_id": bill_id,
         "table_id": str(pos.restaurant.table.id),
