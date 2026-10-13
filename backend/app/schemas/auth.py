@@ -17,6 +17,12 @@ class CurrentUserRole(BaseModel):
     name: str
 
 
+class CurrentUserStation(BaseModel):
+    id: uuid.UUID
+    name: str
+    type: str
+
+
 class CurrentUserResponse(BaseModel):
     id: uuid.UUID
     name: str
@@ -28,3 +34,6 @@ class CurrentUserResponse(BaseModel):
     # that is not recognized. Clients may use it to adapt their UI, but the
     # backend checks every request itself.
     permissions: list[str]
+    # Stations whose preparations the user may work: null means every
+    # station of the restaurant, [] none.
+    stations: list[CurrentUserStation] | None

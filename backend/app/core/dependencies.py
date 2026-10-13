@@ -5,13 +5,20 @@ from uuid import UUID
 from fastapi import Depends, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.errors import ApiError, ErrorCode
-from app.core.permissions import Permission, permissions_for_role
+from app.core.permissions import (
+    Permission,
+    permissions_for_role,
+    station_type_for_role,
+)
 from app.db.dependencies import get_db
 from app.db.models.role import Role
+from app.db.models.station import Station
+from app.db.models.station_assignment import StationAssignment
 from app.db.models.user import User
 
 
@@ -73,6 +80,9 @@ class AuthContext:
     user: User
     role: Role | None
     permissions: frozenset[Permission]
+    # Stations whose preparations the user may work; None means all of the
+    # restaurant's stations. Empty for users without stations.
+    station_scope: frozenset[UUID] | None
 
 
 def get_auth_context(
@@ -87,12 +97,45 @@ def get_auth_context(
     if role is not None and role.restaurant_id != user.restaurant_id:
         role = None
 
+    role_name = role.name if role is not None else None
+    permissions = permissions_for_role(role_name)
+
     return AuthContext(
         user=user,
         role=role,
-        permissions=permissions_for_role(
-            role.name if role is not None else None
-        ),
+        permissions=permissions,
+        station_scope=_station_scope(db, user, role_name, permissions),
+    )
+
+
+def _station_scope(
+    db: Session,
+    user: User,
+    role_name: str | None,
+    permissions: frozenset[Permission],
+) -> frozenset[UUID] | None:
+    if Permission.PREPARATIONS_ALL_STATIONS in permissions:
+        return None
+
+    station_type = station_type_for_role(role_name)
+
+    # Fails closed: no station role, no stations.
+    if station_type is None:
+        return frozenset()
+
+    # Assignments to another restaurant's, an inactive or another type of
+    # station grant nothing.
+    return frozenset(
+        db.scalars(
+            select(StationAssignment.station_id)
+            .join(Station, Station.id == StationAssignment.station_id)
+            .where(
+                StationAssignment.user_id == user.id,
+                Station.restaurant_id == user.restaurant_id,
+                Station.type == station_type,
+                Station.is_active.is_(True),
+            )
+        )
     )
 
 

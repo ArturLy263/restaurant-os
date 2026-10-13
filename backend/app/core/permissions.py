@@ -7,8 +7,11 @@ has the permissions of their role. Anything else is denied: a role name
 that is not listed here, or a role that belongs to another restaurant,
 grants no permissions at all.
 
-Station scope (a Kitchen user seeing only kitchen stations) is not
-enforced yet; Kitchen and Bar currently have the same permissions.
+Preparations are additionally scoped by station: a user without
+PREPARATIONS_ALL_STATIONS works only the stations assigned to them
+(station_assignments) that are active, belong to their restaurant and have
+their role's station type (ROLE_STATION_TYPES). Users of any other role
+without that permission have no stations.
 """
 
 from enum import StrEnum
@@ -39,6 +42,8 @@ class Permission(StrEnum):
     PREPARATIONS_VIEW = "preparations:view"
     PREPARATIONS_UPDATE = "preparations:update"
     PREPARATIONS_SERVE = "preparations:serve"
+    # Not limited to assigned stations.
+    PREPARATIONS_ALL_STATIONS = "preparations:all_stations"
 
     # Bills and payments
     BILLS_VIEW = "bills:view"
@@ -64,8 +69,10 @@ _WAITER = frozenset(
         # have no bill yet; billed items are cancelled through the bill.
         Permission.ORDERS_CANCEL_ITEMS,
         Permission.ORDERS_VOID,
-        # Waiters take ready dishes to the table (READY -> SERVED only).
+        # Waiters take ready dishes to the table (READY -> SERVED only),
+        # from whichever station prepared them.
         Permission.PREPARATIONS_SERVE,
+        Permission.PREPARATIONS_ALL_STATIONS,
     }
 )
 
@@ -97,6 +104,22 @@ ROLE_PERMISSIONS: dict[RoleName, frozenset[Permission]] = {
     RoleName.MANAGER: _ALL,
     RoleName.ADMIN: _ALL,
 }
+
+
+# The station type (stations.type) a station role may be assigned to.
+ROLE_STATION_TYPES: dict[RoleName, str] = {
+    RoleName.KITCHEN: "KITCHEN",
+    RoleName.BAR: "BAR",
+}
+
+
+def station_type_for_role(role_name: str | None) -> str | None:
+    """The station type of a role name; None for every other role."""
+
+    try:
+        return ROLE_STATION_TYPES.get(RoleName(role_name))
+    except ValueError:
+        return None
 
 
 def permissions_for_role(role_name: str | None) -> frozenset[Permission]:

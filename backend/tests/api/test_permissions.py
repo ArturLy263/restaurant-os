@@ -8,7 +8,13 @@ import pytest
 from app.core.permissions import ROLE_PERMISSIONS, Permission
 from app.core.request_id import REQUEST_ID_HEADER
 from app.main import app
-from tests.factories import auth_headers, create_restaurant, create_user
+from tests.factories import (
+    assign_station,
+    auth_headers,
+    create_restaurant,
+    create_station,
+    create_user,
+)
 
 
 ROLES = ["WAITER", "KITCHEN", "BAR", "CASHIER", "MANAGER", "ADMIN"]
@@ -61,7 +67,9 @@ PUBLIC_ROUTES = {("POST", "/api/v1/auth/login"), ("GET", "/health")}
 AUTHENTICATED_ONLY_ROUTES = {("GET", "/api/v1/me")}
 
 # Permissions without an endpoint of their own: orders:manage_all lifts the
-# creator-only order rule; menu and table management APIs do not exist yet.
+# creator-only order rule; preparations:all_stations lifts station scope
+# (waiters serve from every station); menu and table management APIs do
+# not exist yet.
 EXPECTED_ROLE_PERMISSIONS = {
     role: {
         permission
@@ -73,8 +81,16 @@ EXPECTED_ROLE_PERMISSIONS = {
         if role in MANAGEMENT
         else set()
     )
+    | (
+        {"preparations:all_stations"}
+        if role in MANAGEMENT | {"WAITER"}
+        else set()
+    )
     for role in ROLES
 }
+
+# Roles limited to their assigned stations, and the station type of each.
+STATION_ROLE_TYPES = {"KITCHEN": "KITCHEN", "BAR": "BAR"}
 
 
 def call(client, endpoint, headers):
@@ -160,10 +176,14 @@ def test_endpoint_access_by_role(db_client, staff, role, endpoint):
 
     if role in allowed_roles:
         # Authorized: the request reaches the endpoint, which then finds
-        # nothing with these made-up IDs (or lists no events).
-        assert response.status_code in (200, 404), response.text
+        # nothing with these made-up IDs (or lists no events), or, for a
+        # station role, refuses a station it is not assigned to.
+        assert response.status_code in (200, 403, 404), response.text
         if response.status_code == 404:
             assert response.json()["error"]["code"].endswith("_NOT_FOUND")
+        if response.status_code == 403:
+            assert role in STATION_ROLE_TYPES
+            assert response.json()["error"]["code"] == "STATION_ACCESS_DENIED"
     else:
         assert_permission_denied(response, permission)
 
@@ -278,7 +298,18 @@ def test_cashier_bills_and_takes_payment_on_a_waiters_order(pos, staff):
 
 
 @pytest.mark.parametrize("role", sorted(STATION_STAFF))
-def test_station_staff_work_the_preparation_queue(pos, staff, role):
+def test_station_staff_work_the_preparation_queue(
+    pos, staff, role, db_session, restaurant
+):
+    # The burger is prepared at a station of the role's type, assigned to
+    # the user.
+    station = create_station(
+        db_session, restaurant, f"{role} station", STATION_ROLE_TYPES[role]
+    )
+    pos.burger.station_id = station.id
+    db_session.flush()
+    assign_station(db_session, staff[role], station)
+
     pos.headers = headers_for(staff["WAITER"])
     order_id, burger_id, _ = pos.sent_order()
     preparation_id = pos.preparation(burger_id).id
@@ -286,7 +317,7 @@ def test_station_staff_work_the_preparation_queue(pos, staff, role):
     headers = headers_for(staff[role])
 
     queue = pos.client.get(
-        f"/api/v1/stations/{pos.restaurant.station.id}/preparations",
+        f"/api/v1/stations/{station.id}/preparations",
         headers=headers,
     )
     assert queue.status_code == 200
@@ -346,16 +377,20 @@ def test_order_ownership_still_applies_within_a_role(pos, staff, db_session, res
 @pytest.fixture
 def other_staff(db_session):
     other = create_restaurant(db_session, name="Other Restaurant")
-    return {
+    users = {
         role: create_user(db_session, other, role)
         for role in ("WAITER", "KITCHEN", "CASHIER", "MANAGER")
     }
+    # Assigned to its own restaurant's kitchen, never to ours.
+    assign_station(db_session, users["KITCHEN"], other.station)
+
+    return users
 
 
-def assert_same_error(foreign, missing):
+def assert_same_error(foreign, missing, status_code=404):
     """A foreign resource is indistinguishable from a missing one."""
 
-    assert foreign.status_code == missing.status_code == 404
+    assert foreign.status_code == missing.status_code == status_code
     assert foreign.json()["error"]["code"] == missing.json()["error"]["code"]
     assert foreign.json()["detail"] == missing.json()["detail"]
 
@@ -398,7 +433,12 @@ def test_other_restaurant_resources_look_missing(pos, staff, other_staff):
         )
     )
     assert_same_error(*both("CASHIER", "POST", "/api/v1/bills/order/{id}"))
-    assert_same_error(*both("KITCHEN", "GET", "/api/v1/stations/{id}/preparations"))
+    # Station scope answers first: the same refusal for any station the
+    # user is not assigned to, existing or not.
+    assert_same_error(
+        *both("KITCHEN", "GET", "/api/v1/stations/{id}/preparations"),
+        status_code=403,
+    )
     assert_same_error(*both("KITCHEN", "POST", "/api/v1/preparations/{id}/start"))
 
     # Nothing changed in the first restaurant.
@@ -437,6 +477,11 @@ def test_me_returns_the_user_role_and_permissions(db_client, staff, role):
         "restaurant_id": str(user.restaurant_id),
         "role": {"id": str(user.role_id), "name": role},
         "permissions": sorted(EXPECTED_ROLE_PERMISSIONS[role]),
+        # Waiters and management: every station; others: none assigned.
+        "stations": (
+            None if "preparations:all_stations" in EXPECTED_ROLE_PERMISSIONS[role]
+            else []
+        ),
     }
 
 

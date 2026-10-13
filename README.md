@@ -174,6 +174,7 @@ user's role takes effect without a new token.
 | `preparations:view` | `GET /stations/{id}/preparations` | | ✓ | ✓ | | ✓ |
 | `preparations:update` | `POST /preparations/{id}/start`, `/ready` | | ✓ | ✓ | | ✓ |
 | `preparations:serve` | `POST /preparations/{id}/serve` | ✓ | ✓ | ✓ | | ✓ |
+| `preparations:all_stations` | every station, not only assigned ones (see below) | ✓ | | | | ✓ |
 | `bills:create` | `POST /bills/order/{order_id}` | | | | ✓ | ✓ |
 | `bills:adjust` | `POST /bills/{id}/items/{item_id}/cancel`; voiding a billed order | | | | ✓ | ✓ |
 | `bills:view` | `GET /bills/{id}` | | | | ✓ | ✓ |
@@ -211,10 +212,49 @@ user's role takes effect without a new token.
   order also record its creator as `order_created_by` in their metadata.
 - Another restaurant's orders, bills, stations and preparations are
   reported exactly like missing ones (404), never as 403.
-- Kitchen and bar users are not yet limited to their own stations.
+- Kitchen and bar users work only the stations assigned to them (see
+  [Station scope](#station-scope)).
 
 There is no API to manage roles or users yet; `seed.py` creates only the
 `ADMIN` role. Other roles are `roles` rows with the codes above.
+
+#### Station scope
+
+A user without `preparations:all_stations` (in practice `KITCHEN` and
+`BAR`) may view a station's queue and move its preparations only for
+stations assigned to them in the `station_assignments` table. An
+assignment counts only if the station
+
+- belongs to the user's restaurant,
+- is active (`stations.is_active`), and
+- has the type of the user's role: `KITCHEN` users need `KITCHEN`
+  stations, `BAR` users `BAR` stations (`stations.type`).
+
+Anything else grants nothing: a Kitchen or Bar user without assignments
+has no stations, and assignment rows of other roles are ignored.
+Managers, admins and waiters (who serve dishes from every station) have
+`preparations:all_stations`. Assignments are read on every request, so
+adding or removing one applies immediately.
+
+Outside their scope, the queue and every transition answer 403
+`STATION_ACCESS_DENIED`. The queue checks the scope before looking the
+station up, so unassigned, missing and other restaurants' stations get
+the same answer; a preparation of another restaurant stays 404.
+
+There is no API for assignments yet. Until there is, add them with SQL on
+the database in question:
+
+```sql
+INSERT INTO station_assignments (user_id, station_id)
+SELECT u.id, s.id
+FROM users u
+JOIN stations s ON s.restaurant_id = u.restaurant_id
+WHERE u.email = 'cook@example.com' AND s.name = 'Kitchen';
+
+-- and to remove one:
+DELETE FROM station_assignments
+WHERE user_id = (SELECT id FROM users WHERE email = 'cook@example.com');
+```
 
 `GET /api/v1/me` returns the authenticated user, for clients deciding what
 to show:
@@ -226,12 +266,15 @@ to show:
   "email": "ana@example.com",
   "restaurant_id": "0f3a…",
   "role": {"id": "9d2b…", "name": "CASHIER"},
-  "permissions": ["bills:create", "bills:view", "orders:view", "payments:create"]
+  "permissions": ["bills:create", "bills:view", "orders:view", "payments:create"],
+  "stations": []
 }
 ```
 
 `role` is `null` if the user's role belongs to another restaurant;
-`permissions` is empty for an unrecognized role.
+`permissions` is empty for an unrecognized role. `stations` lists the
+stations whose preparations the user may work (`{id, name, type}`, only
+valid assignments): `null` means every station, `[]` none.
 
 ### Idempotency keys
 

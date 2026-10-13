@@ -12,6 +12,7 @@ from app.db.models.product import Product
 from app.db.models.restaurant import Restaurant
 from app.db.models.role import Role
 from app.db.models.station import Station
+from app.db.models.station_assignment import StationAssignment
 from app.db.models.table import Table
 from app.db.models.user import User
 
@@ -138,3 +139,22 @@ def create_user(db: Session, restaurant, role_name: str) -> User:
 def _test_password_hash() -> str:
     # bcrypt is deliberately slow; one hash serves every test user.
     return hash_password(TEST_USER_PASSWORD)
+
+
+def assign_station(db: Session, user: User, station: Station) -> None:
+    """Let a Kitchen or Bar user work `station` (station_assignments)."""
+
+    db.add(StationAssignment(user_id=user.id, station_id=station.id))
+    db.flush()
+
+
+def create_station(db: Session, restaurant, name: str, station_type: str) -> Station:
+    station = Station(
+        restaurant_id=restaurant.restaurant.id,
+        name=name,
+        type=station_type,
+    )
+    db.add(station)
+    db.flush()
+
+    return station

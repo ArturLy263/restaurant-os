@@ -69,6 +69,18 @@ class OrderService:
             )
 
     @staticmethod
+    def _ensure_station_access(
+        station_id: uuid.UUID,
+        station_scope: frozenset[uuid.UUID] | None,
+    ) -> None:
+        if station_scope is not None and station_id not in station_scope:
+            raise ApiError(
+                status_code=status.HTTP_403_FORBIDDEN,
+                code=ErrorCode.STATION_ACCESS_DENIED,
+                message="You are not assigned to this station",
+            )
+
+    @staticmethod
     def _apply_bill_adjustment(
         db: Session,
         bill: Bill,
@@ -1090,10 +1102,17 @@ class OrderService:
         user_id: uuid.UUID,
         preparation_id: uuid.UUID,
         new_status: str,
+        *,
+        station_scope: frozenset[uuid.UUID] | None,
     ) -> Preparation:
+        """Move a preparation to `new_status`.
 
-        order_id = (
-            db.query(OrderItem.order_id)
+        `station_scope` is the set of stations the user may work, or None
+        for all; required, so a caller cannot forget it.
+        """
+
+        found = (
+            db.query(OrderItem.order_id, Preparation.station_id)
             .join(
                 Preparation,
                 Preparation.order_item_id == OrderItem.id,
@@ -1106,15 +1125,22 @@ class OrderService:
                 Preparation.id == preparation_id,
                 Order.restaurant_id == restaurant_id,
             )
-            .scalar()
+            .first()
         )
 
-        if order_id is None:
+        # Another restaurant's preparation is reported like a missing one.
+        if found is None:
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
                 code=ErrorCode.PREPARATION_NOT_FOUND,
                 message="Preparation not found",
             )
+
+        order_id, station_id = found
+
+        # Checked before taking the order lock; a preparation never moves
+        # to another station.
+        OrderService._ensure_station_access(station_id, station_scope)
 
         # Lock the order, as cancelling its items does, so a transition
         # cannot race a cancellation (e.g. revive a CANCELLED preparation),
@@ -1216,7 +1242,15 @@ class OrderService:
         db: Session,
         restaurant_id: uuid.UUID,
         station_id: uuid.UUID,
+        *,
+        station_scope: frozenset[uuid.UUID] | None,
     ) -> list[Preparation]:
+        """The station's open preparations; see update_preparation_status
+        for `station_scope`."""
+
+        # Checked before looking the station up, so the answer is the same
+        # for unassigned, missing and other restaurants' stations.
+        OrderService._ensure_station_access(station_id, station_scope)
 
         station = (
             db.query(Station)

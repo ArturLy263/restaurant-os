@@ -3,7 +3,11 @@ import uuid
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.core.dependencies import require_permission
+from app.core.dependencies import (
+    AuthContext,
+    get_auth_context,
+    require_permission,
+)
 from app.core.permissions import Permission
 from app.db.dependencies import get_db
 from app.db.models.user import User
@@ -27,6 +31,7 @@ def start_preparation(
     current_user: User = Depends(
         require_permission(Permission.PREPARATIONS_UPDATE)
     ),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     return OrderService.update_preparation_status(
         db=db,
@@ -34,6 +39,7 @@ def start_preparation(
         user_id=current_user.id,
         preparation_id=preparation_id,
         new_status="IN_PROGRESS",
+        station_scope=auth.station_scope,
     )
 
 
@@ -47,6 +53,7 @@ def mark_preparation_ready(
     current_user: User = Depends(
         require_permission(Permission.PREPARATIONS_UPDATE)
     ),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     return OrderService.update_preparation_status(
         db=db,
@@ -54,6 +61,7 @@ def mark_preparation_ready(
         user_id=current_user.id,
         preparation_id=preparation_id,
         new_status="READY",
+        station_scope=auth.station_scope,
     )
 
 
@@ -67,6 +75,7 @@ def serve_preparation(
     current_user: User = Depends(
         require_permission(Permission.PREPARATIONS_SERVE)
     ),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     return OrderService.update_preparation_status(
         db=db,
@@ -74,4 +83,5 @@ def serve_preparation(
         user_id=current_user.id,
         preparation_id=preparation_id,
         new_status="SERVED",
+        station_scope=auth.station_scope,
     )

@@ -15,7 +15,12 @@ import pytest
 
 from app.core.request_id import REQUEST_ID_HEADER
 from app.db.models.table import Table
-from tests.factories import auth_headers, create_restaurant, create_user
+from tests.factories import (
+    assign_station,
+    auth_headers,
+    create_restaurant,
+    create_user,
+)
 
 
 def assert_error(response, status_code, code, message=None):
@@ -30,10 +35,14 @@ def assert_error(response, status_code, code, message=None):
 
 @pytest.fixture
 def staff(db_session, restaurant):
-    return {
+    users = {
         role: create_user(db_session, restaurant, role.split("_")[0])
         for role in ("WAITER", "WAITER_2", "CASHIER", "MANAGER", "KITCHEN")
     }
+    # The factory's products are prepared at its (KITCHEN) station.
+    assign_station(db_session, users["KITCHEN"], restaurant.station)
+
+    return users
 
 
 class As:

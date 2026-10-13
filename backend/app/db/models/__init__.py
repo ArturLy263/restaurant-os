@@ -5,6 +5,7 @@ from app.db.models.table import Table
 from app.db.models.category import Category
 from app.db.models.product import Product
 from app.db.models.station import Station
+from app.db.models.station_assignment import StationAssignment
 from app.db.models.order import Order, OrderItem
 from app.db.models.bill import Bill, BillAdjustment, Payment
 from app.db.models.operational_event import OperationalEvent
