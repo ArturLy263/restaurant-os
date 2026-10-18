@@ -24,7 +24,14 @@ from app.db.unit_of_work import commit
 from app.repositories.bill_repository import BillRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.table_repository import TableRepository
+from app.schemas.outbox import (
+    ORDER_AGGREGATE,
+    OrderSentV1,
+    PreparationStatusChangedV1,
+    SentOrderItem,
+)
 from app.services.event_service import EventService
+from app.services.outbox_service import OutboxService
 
 
 # Orders take new items, and further sends, until they are closed or
@@ -522,6 +529,7 @@ class OrderService:
             )
 
         sent_item_ids: list[str] = []
+        sent: list[tuple[OrderItem, Preparation]] = []
 
         for item in items:
 
@@ -573,6 +581,7 @@ class OrderService:
 
             db.add(preparation)
             sent_item_ids.append(str(item.id))
+            sent.append((item, preparation))
 
         if not sent_item_ids:
             raise ApiError(
@@ -618,6 +627,29 @@ class OrderService:
                 "item_ids": sent_item_ids,
                 "initial": is_initial_send,
             },
+        )
+
+        # Preparation ids exist since the flush above.
+        OutboxService.record(
+            db=db,
+            restaurant_id=restaurant_id,
+            aggregate_type=ORDER_AGGREGATE,
+            aggregate_id=order.id,
+            payload=OrderSentV1(
+                order_id=order.id,
+                table_id=order.table_id,
+                initial=is_initial_send,
+                items=[
+                    SentOrderItem(
+                        order_item_id=item.id,
+                        preparation_id=preparation.id,
+                        station_id=preparation.station_id,
+                        product_id=item.product_id,
+                        quantity=item.quantity,
+                    )
+                    for item, preparation in sent
+                ],
+            ),
         )
 
         commit(db)
@@ -850,6 +882,21 @@ class OrderService:
                         "previous_status": prep_previous_status,
                         "reason": reason,
                     },
+                )
+
+                OutboxService.record(
+                    db=db,
+                    restaurant_id=order.restaurant_id,
+                    aggregate_type=ORDER_AGGREGATE,
+                    aggregate_id=order.id,
+                    payload=PreparationStatusChangedV1(
+                        preparation_id=prep.id,
+                        order_id=order.id,
+                        order_item_id=item.id,
+                        station_id=prep.station_id,
+                        previous_status=prep_previous_status,
+                        status="CANCELLED",
+                    ),
                 )
 
         item_event_metadata = {
@@ -1230,6 +1277,21 @@ class OrderService:
                 "order_id": str(order.id),
                 "order_created_by": str(order.user_id),
             },
+        )
+
+        OutboxService.record(
+            db=db,
+            restaurant_id=restaurant_id,
+            aggregate_type=ORDER_AGGREGATE,
+            aggregate_id=order.id,
+            payload=PreparationStatusChangedV1(
+                preparation_id=preparation.id,
+                order_id=order.id,
+                order_item_id=preparation.order_item_id,
+                station_id=preparation.station_id,
+                previous_status=current_status,
+                status=new_status,
+            ),
         )
 
         commit(db)

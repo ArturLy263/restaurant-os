@@ -13,6 +13,7 @@ from tests.factories import auth_headers, create_restaurant
 _PURGE_RESTAURANT = [
     "DELETE FROM idempotency_keys WHERE restaurant_id = :r",
     "DELETE FROM operational_events WHERE restaurant_id = :r",
+    "DELETE FROM outbox_events WHERE restaurant_id = :r",
     "DELETE FROM payments WHERE bill_id IN ("
     " SELECT b.id FROM bills b JOIN orders o ON o.id = b.order_id"
     " WHERE o.restaurant_id = :r)",

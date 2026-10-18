@@ -80,6 +80,20 @@ class Live:
     def payments(self, bill_id):
         return self.count("payments", "bill_id = :b", b=bill_id)
 
+    def outbox(self, event_type):
+        with self.engine.connect() as connection:
+            return connection.execute(
+                text(
+                    "SELECT * FROM outbox_events "
+                    "WHERE restaurant_id = :r AND event_type = :t "
+                    "ORDER BY created_at, id"
+                ),
+                {"r": self.r.restaurant_id, "t": event_type},
+            ).mappings().all()
+
+    def outbox_count(self, event_type):
+        return len(self.outbox(event_type))
+
     def stored_keys(self):
         return self.count(
             "idempotency_keys",
@@ -181,6 +195,7 @@ def test_concurrent_sends_with_same_key_send_once(db_engine, live):
         o=order_id,
     ) == 2
     assert live.events("order.sent") == 1
+    assert live.outbox_count("order.sent") == 1
 
 
 def test_concurrent_cancels_with_same_key_adjust_once(db_engine, live):
@@ -200,6 +215,9 @@ def test_concurrent_cancels_with_same_key_adjust_once(db_engine, live):
     assert live.count("bill_adjustments", "bill_id = :b", b=bill_id) == 1
     assert live.events("bill.adjusted") == 1
     assert live.events("item.cancelled") == 1
+    [cancelled] = live.outbox("preparation.status_changed")
+    assert cancelled["payload"]["order_item_id"] == burger_id
+    assert cancelled["payload"]["status"] == "CANCELLED"
 
 
 def test_concurrent_order_creation_with_same_key_creates_one(db_engine, live):
@@ -306,6 +324,7 @@ def test_concurrent_sends_with_different_keys(db_engine, live):
     [conflict] = [r for r in responses if r.status_code == 409]
     assert conflict.json()["error"]["code"] == "ORDER_HAS_NO_ITEMS_TO_SEND"
     assert live.events("order.sent") == 1
+    assert live.outbox_count("order.sent") == 1
 
 
 @pytest.mark.parametrize("keys", [(None, None), ("a", "b")], ids=["no keys", "different keys"])
@@ -515,3 +534,7 @@ def test_preparation_transition_waits_for_a_queued_cancellation(db_engine, live)
         "SELECT status FROM preparations WHERE id = :p", p=preparation_id
     ) == "CANCELLED"
     assert live.events("preparation.started") == 0
+    # Only the cancellation, which won the lock, has an event.
+    [event] = live.outbox("preparation.status_changed")
+    assert event["payload"]["previous_status"] == "PENDING"
+    assert event["payload"]["status"] == "CANCELLED"

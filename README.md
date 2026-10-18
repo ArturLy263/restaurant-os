@@ -349,6 +349,42 @@ curl -X POST http://127.0.0.1:8000/api/v1/bills/$BILL_ID/payments \
   them. Such tables stay `OCCUPIED` and simply reject new orders until
   their orders are closed or voided.
 
+### Transactional outbox
+
+Selected mutations also write an integration event to the
+`outbox_events` table, for later delivery to kitchen/bar displays and
+other consumers. Nothing delivers them yet: events are only recorded, with
+`published_at` left `NULL`.
+
+The outbox is separate from the audit history. `operational_events`
+records who did what, for people; `outbox_events` is delivery data for
+systems, carries no actor and no free text, and is not exposed by the API.
+
+| Event type | Version | Written when | Payload |
+| --- | --- | --- | --- |
+| `order.sent` | 1 | an order's new items are sent (`POST /orders/{id}/send`) | `order_id`, `table_id`, `initial`, `items[]`: `order_item_id`, `preparation_id`, `station_id`, `product_id`, `quantity` |
+| `preparation.status_changed` | 1 | a preparation is started, ready or served, or cancelled with its item | `preparation_id`, `order_id`, `order_item_id`, `station_id`, `previous_status`, `status` |
+
+Every event has a stable `id` (consumers deduplicate on it), its
+`event_type` and `schema_version`, the `restaurant_id` it belongs to, its
+aggregate (`aggregate_type` `order`, `aggregate_id` the order) and
+`created_at`. Payload contracts are defined in
+`backend/app/schemas/outbox.py`; a change that is not a pure addition
+gets a new version.
+
+- **Atomic:** the event is written in the same transaction as the change
+  it describes (and its audit events and Idempotency-Key result). A
+  rollback leaves neither; if the event cannot be written, the change
+  fails (500) and nothing is committed.
+- **Once per change:** a rejected request (404, 403, 409, ...) writes no
+  event, and an Idempotency-Key replay does not run the operation again,
+  so it writes no second event.
+- **Order:** an order's events are written under its row lock, and
+  `created_at` is taken at insert time (`clock_timestamp()`), so ordering
+  one order's events by `created_at` follows the order the changes were
+  committed in. There is no global order across orders.
+- Events are not backfilled for changes made before the table existed.
+
 ## Tests
 
 ```bash
