@@ -162,3 +162,64 @@ def test_models_match_migrations(migration_database):
         "`alembic revision --autogenerate`:\n"
         + "\n".join(map(str, differences))
     )
+
+
+def test_outbox_delivery_tracking_keeps_existing_events(migration_database):
+    """a7d3e5f1c9b4 adds delivery columns without changing existing events,
+    and its downgrade removes them without losing the events."""
+
+    migrate(migration_database, command.upgrade, "f3a9c1e7b5d2")
+
+    event = {
+        "id": "8b0f4c1e-1d2a-4c3b-9e8f-0a1b2c3d4e5f",
+        "restaurant_id": "1f2e3d4c-5b6a-4978-8a9b-0c1d2e3f4a5b",
+        "aggregate_id": "2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d",
+    }
+    original_columns = (
+        "id, restaurant_id, event_type, schema_version, aggregate_type, "
+        "aggregate_id, payload::text, created_at, published_at"
+    )
+
+    with migration_database.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO restaurants (id, name, timezone, currency, "
+                "is_active, created_at, updated_at) VALUES (:r, 'Migrated', "
+                "'UTC', 'EUR', true, now(), now())"
+            ),
+            {"r": event["restaurant_id"]},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO outbox_events (id, restaurant_id, event_type, "
+                "schema_version, aggregate_type, aggregate_id, payload) "
+                "VALUES (:id, :restaurant_id, 'order.sent', 1, 'order', "
+                ":aggregate_id, '{\"order_id\": \"x\"}')"
+            ),
+            event,
+        )
+        before = connection.execute(
+            text(f"SELECT {original_columns} FROM outbox_events")
+        ).one()
+
+    migrate(migration_database, command.upgrade, "a7d3e5f1c9b4")
+
+    with migration_database.begin() as connection:
+        assert connection.execute(
+            text(f"SELECT {original_columns} FROM outbox_events")
+        ).one() == before
+        attempts, last_attempt_at, next_attempt_at, last_error = connection.execute(
+            text(
+                "SELECT attempts, last_attempt_at, next_attempt_at, last_error "
+                "FROM outbox_events"
+            )
+        ).one()
+        assert (attempts, last_attempt_at, last_error) == (0, None, None)
+        assert next_attempt_at is not None
+
+    migrate(migration_database, command.downgrade, "f3a9c1e7b5d2")
+
+    with migration_database.begin() as connection:
+        assert connection.execute(
+            text(f"SELECT {original_columns} FROM outbox_events")
+        ).one() == before

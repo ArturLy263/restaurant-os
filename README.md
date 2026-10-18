@@ -353,8 +353,8 @@ curl -X POST http://127.0.0.1:8000/api/v1/bills/$BILL_ID/payments \
 
 Selected mutations also write an integration event to the
 `outbox_events` table, for later delivery to kitchen/bar displays and
-other consumers. Nothing delivers them yet: events are only recorded, with
-`published_at` left `NULL`.
+other consumers. `published_at` stays `NULL` until the delivery worker
+below has delivered the event.
 
 The outbox is separate from the audit history. `operational_events`
 records who did what, for people; `outbox_events` is delivery data for
@@ -384,6 +384,48 @@ gets a new version.
   one order's events by `created_at` follows the order the changes were
   committed in. There is no global order across orders.
 - Events are not backfilled for changes made before the table existed.
+
+#### Delivery worker
+
+`app.workers.outbox_worker.OutboxWorker` hands committed events to a
+publisher. Nothing starts it automatically: importing the application
+runs no background work. The caller chooses how to run it:
+
+```python
+from app.db.database import engine
+from app.workers.outbox_worker import LoggingPublisher, OutboxWorker
+
+worker = OutboxWorker(engine, LoggingPublisher())
+worker.process_batch()      # one pass over due events (at most batch_size)
+worker.run(stop_event)      # loop until a threading.Event is set
+```
+
+A publisher is any object with `publish(message)`: returning means
+delivered, raising means not. The only transport so far,
+`LoggingPublisher`, logs event metadata (never payloads).
+
+- **One event per transaction:** the worker claims one due, undelivered
+  event with `SELECT ... FOR UPDATE SKIP LOCKED`, calls the publisher
+  while holding the row lock, and sets `published_at` only after the
+  publisher returned. Concurrent workers skip claimed rows, so an event is
+  never handed to two publishers at the same time.
+- **At least once, not exactly once:** if the worker dies between a
+  successful publish and its commit, the event stays undelivered and is
+  published again. Consumers must deduplicate on the event `id`.
+- **Failures:** a failed attempt increments `attempts`, sets
+  `last_attempt_at`, stores the exception type and message (truncated to
+  1000 characters) in `last_error`, and delays the next attempt
+  (`next_attempt_at`: 5 s, doubling, at most 5 minutes). The event stays
+  undelivered and is retried indefinitely; a batch tries each event at
+  most once.
+- **Order:** an event is not claimed while an older event of the same
+  order is undelivered (claimed elsewhere, waiting for a retry or
+  failing), so each order's events are delivered in order. A failing event
+  holds back the rest of its order only; other orders keep flowing.
+- **Tenants:** each message carries its event's `restaurant_id`;
+  `OutboxWorker(..., restaurant_id=...)` limits a worker to one
+  restaurant. The worker only updates the delivery columns, never an
+  event's type, version, scope, aggregate or payload.
 
 ## Tests
 

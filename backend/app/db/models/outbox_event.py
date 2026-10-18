@@ -38,6 +38,10 @@ class OutboxEvent(Base):
             "jsonb_typeof(payload) = 'object'",
             name="ck_outbox_events_payload_is_object",
         ),
+        CheckConstraint(
+            "attempts >= 0",
+            name="ck_outbox_events_attempts_non_negative",
+        ),
         # What a delivery worker scans: undelivered events, oldest first.
         Index(
             "ix_outbox_events_unpublished",
@@ -97,7 +101,32 @@ class OutboxEvent(Base):
         nullable=False,
     )
 
-    # NULL until delivered. Nothing delivers events yet.
+    # NULL until delivered; set only after the publisher has succeeded
+    # (app.workers.outbox_worker).
     published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
+    )
+
+    # Delivery bookkeeping, written only by the worker. The event itself
+    # (type, version, scope, aggregate, payload) never changes.
+    attempts: Mapped[int] = mapped_column(
+        Integer,
+        server_default=text("0"),
+        nullable=False,
+    )
+
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+
+    # Not retried before this time (backoff after a failed attempt).
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.clock_timestamp(),
+        nullable=False,
+    )
+
+    # The last failed attempt's exception type and (truncated) message.
+    last_error: Mapped[str | None] = mapped_column(
+        String(1000),
     )
