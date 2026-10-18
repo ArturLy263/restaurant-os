@@ -1,5 +1,7 @@
+import uuid
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +14,19 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
     admin_password: str
+
+    # Outbox delivery worker (app.workers.outbox_worker); read only by its
+    # runner, never by the API. Bounds reject unsafe values at startup.
+    outbox_worker_batch_size: int = Field(default=100, ge=1, le=1000)
+    outbox_worker_poll_interval_seconds: float = Field(default=1.0, gt=0, le=300)
+    # Deliver only this restaurant's events; unset = every restaurant.
+    outbox_worker_restaurant_id: uuid.UUID | None = None
+    # Failed attempts after which an event is dead-lettered.
+    outbox_max_attempts: int = Field(default=10, ge=1, le=100)
+    outbox_publish_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    # Delivered events older than this are removed by `cleanup`.
+    outbox_retention_days: int = Field(default=7, ge=1, le=3650)
+    outbox_cleanup_batch_size: int = Field(default=1000, ge=1, le=10000)
 
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / ".env",

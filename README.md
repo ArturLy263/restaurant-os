@@ -387,45 +387,109 @@ gets a new version.
 
 #### Delivery worker
 
-`app.workers.outbox_worker.OutboxWorker` hands committed events to a
-publisher. Nothing starts it automatically: importing the application
-runs no background work. The caller chooses how to run it:
+`app.workers.outbox_worker` hands committed events to a publisher. Nothing
+starts it automatically: importing the application runs no background
+work. Run it as its own process, from `backend/`:
 
-```python
-from app.db.database import engine
-from app.workers.outbox_worker import LoggingPublisher, OutboxWorker
-
-worker = OutboxWorker(engine, LoggingPublisher())
-worker.process_batch()      # one pass over due events (at most batch_size)
-worker.run(stop_event)      # loop until a threading.Event is set
+```bash
+cd backend
+python -m app.workers.outbox_worker            # deliver until SIGINT/SIGTERM
+python -m app.workers.outbox_worker cleanup    # delete old delivered events, then exit
 ```
+
+On SIGINT or SIGTERM the worker finishes the event it is delivering (at
+most the publish timeout), stops, closes its database connections and
+exits with status 0. Its connections show up in `pg_stat_activity` as
+`application_name = 'restaurantos-outbox-worker'`. An invalid setting
+stops it before it connects. In code, `OutboxWorker(engine, publisher,
+...)` offers `process_batch()` (one bounded pass) and `run(stop_event)`.
 
 A publisher is any object with `publish(message)`: returning means
 delivered, raising means not. The only transport so far,
 `LoggingPublisher`, logs event metadata (never payloads).
 
-- **One event per transaction:** the worker claims one due, undelivered
-  event with `SELECT ... FOR UPDATE SKIP LOCKED`, calls the publisher
-  while holding the row lock, and sets `published_at` only after the
-  publisher returned. Concurrent workers skip claimed rows, so an event is
-  never handed to two publishers at the same time.
+Settings (environment or `.env`; out-of-range values are rejected):
+
+| Variable | Default | Allowed | Meaning |
+| --- | --- | --- | --- |
+| `OUTBOX_WORKER_BATCH_SIZE` | 100 | 1-1000 | events per batch |
+| `OUTBOX_WORKER_POLL_INTERVAL_SECONDS` | 1.0 | >0-300 | pause when there is nothing to do |
+| `OUTBOX_WORKER_RESTAURANT_ID` | unset (all) | a UUID | deliver/clean up only this restaurant's events |
+| `OUTBOX_MAX_ATTEMPTS` | 10 | 1-100 | failed attempts before an event is dead-lettered |
+| `OUTBOX_PUBLISH_TIMEOUT_SECONDS` | 30 | >0-300 | how long to wait for one publisher call |
+| `OUTBOX_RETENTION_DAYS` | 7 | 1-3650 | `cleanup` deletes events delivered longer ago |
+| `OUTBOX_CLEANUP_BATCH_SIZE` | 1000 | 1-10000 | rows deleted per cleanup transaction |
+
+- **One event per transaction:** the worker claims one due, undelivered,
+  not dead-lettered event with `SELECT ... FOR UPDATE SKIP LOCKED`, calls
+  the publisher while holding the row lock, and sets `published_at` only
+  after the publisher returned. Concurrent workers skip claimed rows, so
+  an event is never handed to two publishers at the same time.
 - **At least once, not exactly once:** if the worker dies between a
   successful publish and its commit, the event stays undelivered and is
   published again. Consumers must deduplicate on the event `id`.
 - **Failures:** a failed attempt increments `attempts`, sets
   `last_attempt_at`, stores the exception type and message (truncated to
   1000 characters) in `last_error`, and delays the next attempt
-  (`next_attempt_at`: 5 s, doubling, at most 5 minutes). The event stays
-  undelivered and is retried indefinitely; a batch tries each event at
-  most once.
+  (`next_attempt_at`: 5 s, doubling, at most 5 minutes). A batch tries
+  each event at most once. Logs name the event and the exception type,
+  never the payload or the exception message.
+- **Dead letters:** the `OUTBOX_MAX_ATTEMPTS`-th failed attempt sets
+  `dead_lettered_at` instead of a retry time. A dead-lettered event is
+  never retried automatically, keeps its id and payload, and is logged at
+  ERROR level. It stays undelivered, so **it keeps holding back every
+  later event of its order** (other orders are not affected). There is no
+  recovery tooling yet; do not edit these rows by hand without a decided
+  recovery policy.
+- **Publish timeout:** the publisher runs in a separate thread, and the
+  worker stops waiting for it after `OUTBOX_PUBLISH_TIMEOUT_SECONDS`.
+  Python cannot interrupt a blocking call, so **a timed-out call is not
+  cancelled**: it is abandoned and may still complete, and deliver, later.
+  The attempt is recorded as failed (`PublishTimeout` in `last_error`),
+  which releases the row lock; the event is retried, so a late-completing
+  call can produce a duplicate (at least once). While an abandoned call is
+  still running the worker claims no events, so it never has more than one
+  publisher call in flight. The timeout bounds how long the worker waits
+  and holds a row lock, not how long the publisher runs.
 - **Order:** an event is not claimed while an older event of the same
-  order is undelivered (claimed elsewhere, waiting for a retry or
-  failing), so each order's events are delivered in order. A failing event
-  holds back the rest of its order only; other orders keep flowing.
+  order is undelivered (claimed elsewhere, waiting for a retry, failing or
+  dead-lettered), so each order's events are delivered in order.
 - **Tenants:** each message carries its event's `restaurant_id`;
-  `OutboxWorker(..., restaurant_id=...)` limits a worker to one
-  restaurant. The worker only updates the delivery columns, never an
-  event's type, version, scope, aggregate or payload.
+  `OUTBOX_WORKER_RESTAURANT_ID` limits a worker to one restaurant. The
+  worker only updates the delivery columns, never an event's type,
+  version, scope, aggregate or payload.
+
+Inspecting dead letters and stuck events (read-only):
+
+```sql
+-- Dead-lettered events, newest first
+SELECT id, restaurant_id, event_type, aggregate_id, attempts,
+       last_attempt_at, dead_lettered_at, last_error
+FROM outbox_events
+WHERE dead_lettered_at IS NOT NULL
+ORDER BY dead_lettered_at DESC;
+
+-- Events held back behind a dead letter of the same order
+SELECT later.id, later.event_type, later.aggregate_id, later.created_at
+FROM outbox_events dead
+JOIN outbox_events later
+  ON later.aggregate_type = dead.aggregate_type
+ AND later.aggregate_id = dead.aggregate_id
+ AND (later.created_at, later.id) > (dead.created_at, dead.id)
+ AND later.published_at IS NULL
+WHERE dead.dead_lettered_at IS NOT NULL;
+```
+
+`last_error` holds the exception message of the publisher, so read it
+with the same care as the payload.
+
+**Retention:** `cleanup` deletes events delivered more than
+`OUTBOX_RETENTION_DAYS` ago (never less than one day), oldest delivery
+first, in transactions of at most `OUTBOX_CLEANUP_BATCH_SIZE` rows
+(`DELETE ... WHERE id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)`),
+at most `--max-batches` (default 100) per run. Undelivered and
+dead-lettered events are never deleted. It runs only when invoked, e.g.
+from cron: `cd backend && python -m app.workers.outbox_worker cleanup`.
 
 ## Tests
 

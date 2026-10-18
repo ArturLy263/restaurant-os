@@ -223,3 +223,62 @@ def test_outbox_delivery_tracking_keeps_existing_events(migration_database):
         assert connection.execute(
             text(f"SELECT {original_columns} FROM outbox_events")
         ).one() == before
+
+
+def test_outbox_dead_letter_migration_keeps_existing_events(migration_database):
+    """c5e8a2d4f6b1 adds dead_lettered_at (NULL for every existing event)
+    and its CHECK, which existing delivered and failing rows satisfy; the
+    downgrade drops them without losing events."""
+
+    migrate(migration_database, command.upgrade, "a7d3e5f1c9b4")
+
+    restaurant_id = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f"
+    columns = (
+        "id, restaurant_id, event_type, schema_version, aggregate_type, "
+        "aggregate_id, payload::text, created_at, published_at, attempts, "
+        "last_attempt_at, next_attempt_at, last_error"
+    )
+
+    with migration_database.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO restaurants (id, name, timezone, currency, "
+                "is_active, created_at, updated_at) VALUES (:r, 'Migrated', "
+                "'UTC', 'EUR', true, now(), now())"
+            ),
+            {"r": restaurant_id},
+        )
+        for event_id, published, attempts, error in (
+            ("4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f7a", "now()", 1, None),
+            ("5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b", "NULL", 7, "RuntimeError: down"),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO outbox_events (id, restaurant_id, event_type, "
+                    "schema_version, aggregate_type, aggregate_id, payload, "
+                    f"published_at, attempts, last_attempt_at, last_error) "
+                    f"VALUES (:id, :r, 'order.sent', 1, 'order', :id, "
+                    f"'{{\"order_id\": \"x\"}}', {published}, :attempts, now(), :error)"
+                ),
+                {"id": event_id, "r": restaurant_id, "attempts": attempts, "error": error},
+            )
+        before = connection.execute(
+            text(f"SELECT {columns} FROM outbox_events ORDER BY id")
+        ).all()
+
+    migrate(migration_database, command.upgrade, "c5e8a2d4f6b1")
+
+    with migration_database.begin() as connection:
+        assert connection.execute(
+            text(f"SELECT {columns} FROM outbox_events ORDER BY id")
+        ).all() == before
+        assert connection.scalars(
+            text("SELECT dead_lettered_at FROM outbox_events")
+        ).all() == [None, None]
+
+    migrate(migration_database, command.downgrade, "a7d3e5f1c9b4")
+
+    with migration_database.begin() as connection:
+        assert connection.execute(
+            text(f"SELECT {columns} FROM outbox_events ORDER BY id")
+        ).all() == before

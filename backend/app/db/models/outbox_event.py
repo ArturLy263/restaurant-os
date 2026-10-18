@@ -42,6 +42,11 @@ class OutboxEvent(Base):
             "attempts >= 0",
             name="ck_outbox_events_attempts_non_negative",
         ),
+        # Delivered and dead-lettered are final and exclusive.
+        CheckConstraint(
+            "published_at IS NULL OR dead_lettered_at IS NULL",
+            name="ck_outbox_events_delivered_or_dead_lettered",
+        ),
         # What a delivery worker scans: undelivered events, oldest first.
         Index(
             "ix_outbox_events_unpublished",
@@ -54,6 +59,18 @@ class OutboxEvent(Base):
             "aggregate_type",
             "aggregate_id",
             "created_at",
+        ),
+        # Retention cleanup: delivered events, oldest delivery first.
+        Index(
+            "ix_outbox_events_published",
+            "published_at",
+            postgresql_where=text("published_at IS NOT NULL"),
+        ),
+        # Operators: the dead-letter list.
+        Index(
+            "ix_outbox_events_dead_lettered",
+            "dead_lettered_at",
+            postgresql_where=text("dead_lettered_at IS NOT NULL"),
         ),
     )
 
@@ -129,4 +146,11 @@ class OutboxEvent(Base):
     # The last failed attempt's exception type and (truncated) message.
     last_error: Mapped[str | None] = mapped_column(
         String(1000),
+    )
+
+    # Set when the last allowed attempt failed: never retried
+    # automatically. Still undelivered (published_at NULL), so it keeps
+    # holding back its aggregate's later events.
+    dead_lettered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
     )
