@@ -15,8 +15,9 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60
     admin_password: str
 
-    # Outbox delivery worker (app.workers.outbox_worker); read only by its
-    # runner, never by the API. Bounds reject unsafe values at startup.
+    # Outbox delivery worker (app.workers.outbox_worker); read by its
+    # runner, and by the API only when OUTBOX_WEBSOCKET_DELIVERY is on.
+    # Bounds reject unsafe values at startup.
     outbox_worker_batch_size: int = Field(default=100, ge=1, le=1000)
     outbox_worker_poll_interval_seconds: float = Field(default=1.0, gt=0, le=300)
     # Deliver only this restaurant's events; unset = every restaurant.
@@ -29,6 +30,10 @@ class Settings(BaseSettings):
     outbox_cleanup_batch_size: int = Field(default=1000, ge=1, le=10000)
 
     # Station event streams (WebSocket, app.realtime).
+    # Run the outbox worker inside the API process and deliver to its
+    # streams (app.realtime.delivery). Off by default; enable it in one
+    # API process only, and do not run the standalone worker's `run` then.
+    outbox_websocket_delivery: bool = False
     # A new connection must authenticate within this time.
     websocket_auth_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
     # How often an open connection's authorization is checked again

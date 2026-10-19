@@ -591,6 +591,15 @@ def main(argv: Sequence[str] | None = None, *, config=None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    if args.command == "run" and getattr(config, "outbox_websocket_delivery", False):
+        # The API process delivers to its station streams; events this
+        # process claimed would never reach them.
+        logger.error(
+            "OUTBOX_WEBSOCKET_DELIVERY is enabled: the API process delivers "
+            "outbox events; run only `cleanup` here"
+        )
+        return 2
+
     engine = create_worker_engine(config.database_url)
 
     try:

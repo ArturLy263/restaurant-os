@@ -51,7 +51,8 @@ def floor(db_engine, committed_restaurants, hub):
     """Restaurant A with Kitchen, Grill, Bar and an inactive kitchen
     station and one user per case; restaurant B with its own users."""
 
-    a_id = committed_restaurants("A").restaurant_id
+    restaurant_a = committed_restaurants("A")
+    a_id = restaurant_a.restaurant_id
     b_id = committed_restaurants("B").restaurant_id
     a = SimpleNamespace(restaurant=SimpleNamespace(id=a_id))
     b = SimpleNamespace(restaurant=SimpleNamespace(id=b_id))
@@ -101,6 +102,7 @@ def floor(db_engine, committed_restaurants, hub):
         db.commit()
 
     return SimpleNamespace(
+        restaurant_a=restaurant_a,
         a_id=a_id,
         b_id=b_id,
         stations=stations,
@@ -111,8 +113,9 @@ def floor(db_engine, committed_restaurants, hub):
     )
 
 
-def connect(floor, station_id):
-    return floor.client.websocket_connect(f"/api/v1/stations/{station_id}/events")
+def connect(floor, station_id, client=None):
+    client = client or floor.client
+    return client.websocket_connect(f"/api/v1/stations/{station_id}/events")
 
 
 def authenticate(ws, token, **extra):
@@ -143,10 +146,10 @@ def receive_json(ws):
     return json.loads(message["text"])
 
 
-def subscribe(floor, station_id, token):
+def subscribe(floor, station_id, token, client=None):
     """An open, authorized stream (a context manager)."""
 
-    session = connect(floor, station_id)
+    session = connect(floor, station_id, client)
     ws = session.__enter__()
     authenticate(ws, token)
     assert receive_json(ws) == {"type": "subscribed", "station_id": str(station_id)}

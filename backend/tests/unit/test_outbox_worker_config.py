@@ -151,3 +151,46 @@ def test_importing_the_application_starts_no_worker():
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "idle"
+
+
+def test_importing_the_application_starts_no_worker_even_when_enabled():
+    """Station delivery starts with the server's lifespan, not on import."""
+
+    check = (
+        "import threading\n"
+        "import app.main\n"
+        "assert app.main.settings.outbox_websocket_delivery is True\n"
+        "assert threading.active_count() == 1, threading.enumerate()\n"
+        "print('idle')\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", check],
+        cwd=BACKEND,
+        env=isolated_env(
+            JWT_SECRET_KEY="test",
+            ADMIN_PASSWORD="test",
+            OUTBOX_WEBSOCKET_DELIVERY="true",
+        ),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "idle"
+
+
+def test_standalone_runner_refuses_to_deliver_when_the_api_does():
+    result = subprocess.run(
+        [sys.executable, "-m", "app.workers.outbox_worker", "run"],
+        cwd=BACKEND,
+        env=isolated_env(OUTBOX_WEBSOCKET_DELIVERY="true"),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 2
+    assert "OUTBOX_WEBSOCKET_DELIVERY is enabled" in result.stderr
+    assert "Outbox worker started" not in result.stderr
