@@ -649,8 +649,9 @@ whole restaurant except `resync_required`, which carries no payload.
   moment, possibly none. A display that is offline, reconnecting or was
   disconnected misses those events. **After every (re)connect a display
   must reload its queue with `GET /api/v1/stations/{id}/preparations`,
-  then apply events.** A successful WebSocket send is not proof that the
-  display processed or stored anything.
+  then apply events** (see [Client synchronization](#client-synchronization)).
+  A successful WebSocket send is not proof that the display processed or
+  stored anything.
 - **At least once.** The same event can arrive twice with the same `id`
   (worker crash after delivering, timed-out delivery): deduplicate on
   `id`.
@@ -680,6 +681,55 @@ whole restaurant except `resync_required`, which carries no payload.
 | `WEBSOCKET_QUEUE_SIZE` | 100 | 1-10000 | messages buffered per stream before 4429 |
 | `WEBSOCKET_MAX_CONNECTIONS` | 500 | 1-100000 | streams per API process before 1013 |
 
+#### Client synchronization
+
+A display keeps its station queue correct by combining one HTTP load
+with the stream. On every connection:
+
+1. Connect, authenticate, and **wait for `subscribed`**. The server
+   registers the connection for the station's events just before sending
+   it, so every event delivered from then on reaches the connection
+   (after `subscribed`).
+2. Then load the queue with `GET /api/v1/stations/{id}/preparations`
+   (open preparations: `PENDING`, `IN_PROGRESS`, `READY`). Loading it
+   before `subscribed` can miss an event delivered in between; loading it
+   after cannot: an event delivered before the subscription was committed
+   before the load, so the queue already reflects it, and every event
+   delivered later reaches this connection.
+3. **Events arrive while and after the queue loads**, and some of them
+   are already reflected in it: an event committed before the load may
+   still be waiting for delivery. Buffer the events received during the
+   load, then apply them, and every later one, in arrival order.
+
+Apply events idempotently and reconcile them with the loaded state; never
+assume an event is new:
+
+- Deduplicate on the event `id`. Keep the recently applied ids across
+  reconnects (a bounded set is enough): an event can be delivered again,
+  also to a later connection.
+- Key everything by `preparation_id`. `order.sent` adds its items as
+  `PENDING` preparations unless they are already present.
+  `preparation.status_changed` sets that preparation's status; `SERVED`
+  and `CANCELLED` remove it from the queue.
+- An event whose `previous_status` differs from the preparation's current
+  status, or that names a preparation not in the queue, is already
+  reflected in the loaded queue (or concerns a preparation that has left
+  it): ignore it. One order's events arrive in commit order, so an event
+  newer than the loaded queue always continues from the status shown.
+  When in doubt, reload the queue instead of guessing.
+
+Start over with a fresh queue load (step 2) whenever the state may have
+diverged:
+
+- **`resync_required`**: the stream stays open; reload the queue, and
+  buffer and reconcile the events that arrive meanwhile as above.
+- **Any close or network loss** (4429, 1013, 1012 on a server restart,
+  a dropped connection): reconnect with backoff, wait for `subscribed`,
+  reload. Events delivered while disconnected are not sent again.
+- **4401**: log in again for a fresh token, then reconnect. **4403** and
+  **4404** do not go away by retrying: the user's access or the station
+  changed.
+
 #### Local development and testing
 
 - With `OUTBOX_WEBSOCKET_DELIVERY=true` against your development
@@ -691,8 +741,9 @@ whole restaurant except `resync_required`, which carries no payload.
   (authentication, scope, revocation, cleanup) and
   `test_station_event_fanout.py` (routing, ordering, unsupported and
   malformed events, slow clients, the in-process runner) use committed
-  data in the test database; `backend/tests/unit/test_station_event_hub.py`
-  and `test_station_event_publisher.py` need no database.
+  data in the test database; `backend/tests/unit/test_station_event_hub.py`,
+  `test_station_event_publisher.py` and `test_station_delivery_lifespan.py`
+  (delivery is stopped off the event loop at shutdown) need no database.
 - uvicorn needs a WebSocket protocol library to accept upgrades;
   `wsproto` is pinned in `backend/requirements.txt`.
 
