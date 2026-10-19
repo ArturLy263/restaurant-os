@@ -273,4 +273,3 @@ class StationEventStream:
         except (RuntimeError, WebSocketDisconnect, OSError):
             # Already closed by the client.
             pass
-
