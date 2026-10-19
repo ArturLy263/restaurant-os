@@ -177,7 +177,7 @@ user's role takes effect without a new token.
 | `orders:cancel_items` | `POST /orders/{id}/items/{item_id}/cancel` (unbilled items) | ✓ | | | | ✓ |
 | `orders:void` | `POST /orders/{id}/void` | ✓ | | | | ✓ |
 | `orders:manage_all` | modify orders created by others (see below) | | | | | ✓ |
-| `preparations:view` | `GET /stations/{id}/preparations` | | ✓ | ✓ | | ✓ |
+| `preparations:view` | `GET /stations`, `GET /stations/{id}/preparations` | | ✓ | ✓ | | ✓ |
 | `preparations:update` | `POST /preparations/{id}/start`, `/ready` | | ✓ | ✓ | | ✓ |
 | `preparations:serve` | `POST /preparations/{id}/serve` | ✓ | ✓ | ✓ | | ✓ |
 | `preparations:all_stations` | every station, not only assigned ones (see below) | ✓ | | | | ✓ |
@@ -281,6 +281,22 @@ to show:
 `permissions` is empty for an unrecognized role. `stations` lists the
 stations whose preparations the user may work (`{id, name, type}`, only
 valid assignments): `null` means every station, `[]` none.
+
+#### Station list
+
+`GET /api/v1/stations` (`preparations:view`) lists, by name, the stations
+whose queue the user may view: every station of the restaurant for users
+with `preparations:all_stations` (inactive ones included, as their
+queues stay viewable), otherwise only the valid assignments of the
+[station scope](#station-scope), possibly none. Other restaurants'
+stations are never listed.
+
+```json
+[
+  {"id": "3f9a…", "name": "Bar", "type": "BAR", "is_active": true},
+  {"id": "e7d2…", "name": "Kitchen", "type": "KITCHEN", "is_active": true}
+]
+```
 
 #### Station queue
 

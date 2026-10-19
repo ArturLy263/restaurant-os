@@ -43,6 +43,8 @@ ENDPOINTS = [
      "orders:cancel_items", {"WAITER"} | MANAGEMENT),
     ("POST", f"/api/v1/orders/{_ID}/void", {"reason": "x"},
      "orders:void", {"WAITER"} | MANAGEMENT),
+    ("GET", "/api/v1/stations", None,
+     "preparations:view", STATION_STAFF | MANAGEMENT),
     ("GET", f"/api/v1/stations/{_ID}/preparations", None,
      "preparations:view", STATION_STAFF | MANAGEMENT),
     ("POST", f"/api/v1/preparations/{_ID}/start", None,

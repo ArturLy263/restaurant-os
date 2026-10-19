@@ -1330,6 +1330,26 @@ class OrderService:
         return station
 
     @staticmethod
+    def get_visible_stations(
+        db: Session,
+        restaurant_id: uuid.UUID,
+        *,
+        station_scope: frozenset[uuid.UUID] | None,
+    ) -> list[Station]:
+        """The restaurant's stations within `station_scope` (None: all of
+        them, inactive ones included), by name."""
+
+        if station_scope is not None and not station_scope:
+            return []
+
+        query = db.query(Station).filter(Station.restaurant_id == restaurant_id)
+
+        if station_scope is not None:
+            query = query.filter(Station.id.in_(station_scope))
+
+        return query.order_by(Station.name.asc(), Station.id.asc()).all()
+
+    @staticmethod
     def get_station_preparations(
         db: Session,
         restaurant_id: uuid.UUID,

@@ -4,6 +4,13 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
+class StationResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    type: str
+    is_active: bool
+
+
 class PreparationQueueModifier(BaseModel):
     modifier_id: uuid.UUID
     # The name stored when the item was added (order_item_modifiers).
