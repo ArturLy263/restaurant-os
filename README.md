@@ -368,9 +368,55 @@ systems, carries no actor and no free text, and is not exposed by the API.
 Every event has a stable `id` (consumers deduplicate on it), its
 `event_type` and `schema_version`, the `restaurant_id` it belongs to, its
 aggregate (`aggregate_type` `order`, `aggregate_id` the order) and
-`created_at`. Payload contracts are defined in
-`backend/app/schemas/outbox.py`; a change that is not a pure addition
-gets a new version.
+`created_at`.
+
+#### Event contracts
+
+Each (`event_type`, `schema_version`) pair has one payload model in
+`backend/app/schemas/outbox.py`, listed in `CONTRACTS`. `event_type` says
+what happened and never changes meaning; `schema_version` numbers the
+shape and rules of that type's payload. The envelope (the columns above)
+comes from the contract, so `aggregate_id` is always the payload's
+`order_id`.
+
+A payload is valid only if it is exactly the canonical JSON of its model:
+strict JSON types (`2`, not `"2"` or `2.0`; `true`, not `1`), lower-case
+hyphenated UUIDs, no missing or unknown fields, and the version's rules.
+v1 requires `quantity` >= 1 and at least one sent item, each item and
+preparation once, and only the five transitions it describes
+(`PENDING`->`IN_PROGRESS`->`READY`->`SERVED`, `PENDING`/`IN_PROGRESS`->
+`CANCELLED`). Every event is checked to parse back before it is written;
+one that does not fails the change (500) like any outbox failure.
+
+Consumers call `parse_payload(event_type, schema_version, payload)`:
+
+- `UnsupportedEventError`: the pair is not known to this consumer (e.g. a
+  newer version during a rolling deploy). It is not malformed; skip or
+  park it, never guess its fields.
+- `InvalidEventPayloadError`: a known pair whose payload breaks its
+  contract. Its message names the failing fields, never their values.
+
+Both derive from `EventContractError`. The delivery worker does not
+parse payloads: it delivers any committed event, so a consumer's version
+support never dead-letters events or blocks an order.
+
+Compatibility rules for changing a contract:
+
+- **Same version:** documentation, or a new optional field consumers of
+  that version may ignore. Payloads forbid unknown fields, so every
+  consumer of the version must be updated first; when in doubt, add a
+  version.
+- **New version** (a new model next to the old one): renaming, removing,
+  retyping or making a field required, changing a field's meaning, and
+  widening or narrowing allowed values (a new status or transition).
+  Producers switch to it only once consumers support it.
+- **Never:** editing or removing a version while its events may still be
+  stored or undelivered, or rewriting stored payloads. A new meaning is a
+  new `event_type`, not a new version.
+- Event types are added only together with a consumer.
+
+`backend/tests/unit/test_event_contracts.py` holds a golden v1 payload
+per contract; they must keep parsing and dumping unchanged.
 
 - **Atomic:** the event is written in the same transaction as the change
   it describes (and its audit events and Idempotency-Key result). A

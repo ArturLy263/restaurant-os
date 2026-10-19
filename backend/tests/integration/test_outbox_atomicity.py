@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from app.db.unit_of_work import owned_transaction
 from app.schemas.order import OrderDetailResponse
 from app.schemas.outbox import (
-    ORDER_AGGREGATE,
     OrderSentV1,
     PreparationStatusChangedV1,
 )
@@ -209,8 +208,6 @@ def test_recording_an_event_neither_flushes_nor_commits(db_engine, live):
         event = OutboxService.record(
             db=db,
             restaurant_id=live.r.restaurant_id,
-            aggregate_type=ORDER_AGGREGATE,
-            aggregate_id=order_id,
             payload=PreparationStatusChangedV1(
                 preparation_id=preparation_id,
                 order_id=order_id,

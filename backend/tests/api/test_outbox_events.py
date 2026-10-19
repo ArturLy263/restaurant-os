@@ -15,6 +15,7 @@ from app.schemas.outbox import (
     OrderSentV1,
     OutboxPayload,
     PreparationStatusChangedV1,
+    parse_payload,
 )
 from tests.factories import (
     assign_station,
@@ -411,3 +412,29 @@ def test_payloads_reject_unknown_fields_and_statuses():
             items=[],
             user_id=uuid.uuid4(),
         )
+
+
+def test_every_written_event_parses_under_its_contract(
+    pos, db_session, restaurant
+):
+    """Envelope and payload agree, and the stored JSON is canonical."""
+
+    order_id, burger_id, coke_id = pos.sent_order()
+    assert pos.add_item(order_id, pos.coke).status_code == 201
+    assert pos.send(order_id).status_code == 200
+    pos.start_preparation(coke_id, "start")
+    pos.cancel(order_id, burger_id, reason="Out of stock")
+
+    events = outbox(db_session, restaurant)
+    assert [e.event_type for e in events] == [SENT, SENT, CHANGED, CHANGED]
+
+    for event in events:
+        model = parse_payload(event.event_type, event.schema_version, event.payload)
+
+        assert (model.event_type, model.schema_version) == (
+            event.event_type,
+            event.schema_version,
+        )
+        assert event.aggregate_type == model.aggregate_type == "order"
+        assert event.aggregate_id == model.aggregate_id == uuid.UUID(order_id)
+        assert model.model_dump(mode="json") == event.payload

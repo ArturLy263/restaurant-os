@@ -25,7 +25,6 @@ from app.repositories.bill_repository import BillRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.table_repository import TableRepository
 from app.schemas.outbox import (
-    ORDER_AGGREGATE,
     OrderSentV1,
     PreparationStatusChangedV1,
     SentOrderItem,
@@ -633,8 +632,6 @@ class OrderService:
         OutboxService.record(
             db=db,
             restaurant_id=restaurant_id,
-            aggregate_type=ORDER_AGGREGATE,
-            aggregate_id=order.id,
             payload=OrderSentV1(
                 order_id=order.id,
                 table_id=order.table_id,
@@ -887,8 +884,6 @@ class OrderService:
                 OutboxService.record(
                     db=db,
                     restaurant_id=order.restaurant_id,
-                    aggregate_type=ORDER_AGGREGATE,
-                    aggregate_id=order.id,
                     payload=PreparationStatusChangedV1(
                         preparation_id=prep.id,
                         order_id=order.id,
@@ -1282,8 +1277,6 @@ class OrderService:
         OutboxService.record(
             db=db,
             restaurant_id=restaurant_id,
-            aggregate_type=ORDER_AGGREGATE,
-            aggregate_id=order.id,
             payload=PreparationStatusChangedV1(
                 preparation_id=preparation.id,
                 order_id=order.id,

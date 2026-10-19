@@ -21,7 +21,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.db.models.table import Table
-from app.schemas.outbox import ORDER_AGGREGATE, PreparationStatusChangedV1
+from app.schemas.outbox import PreparationStatusChangedV1
 from app.services.outbox_service import OutboxService
 from app.workers.outbox_worker import (
     OutboxMessage,
@@ -192,6 +192,44 @@ def test_delivers_undelivered_events_in_order_and_marks_them(db_engine, live):
     assert len(publisher.messages) == 2
 
 
+def test_events_this_code_cannot_parse_are_delivered_unchanged(db_engine, live):
+    """The worker is payload-agnostic (Epic D3): an unknown version or a
+    payload this code would reject is handed to the publisher like any
+    other event, never failed or dead-lettered for it."""
+
+    rows = [
+        ("order.sent", 99, {"future_field": True}),
+        ("order.archived", 1, {"order_id": "not-a-uuid"}),
+    ]
+    with live.engine.begin() as connection:
+        for event_type, version, payload in rows:
+            connection.execute(
+                text(
+                    "INSERT INTO outbox_events (id, restaurant_id, event_type, "
+                    "schema_version, aggregate_type, aggregate_id, payload) "
+                    "VALUES (:id, :r, :t, :v, 'order', :a, CAST(:p AS jsonb))"
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "r": live.r.restaurant_id,
+                    "t": event_type,
+                    "v": version,
+                    "a": uuid.uuid4(),
+                    "p": json.dumps(payload),
+                },
+            )
+    publisher = Recorder()
+
+    result = worker(db_engine, live, publisher, max_attempts=1).process_batch()
+
+    assert len(result.delivered) == 2
+    assert result.failed == result.dead_lettered == []
+    assert [
+        (m.event_type, m.schema_version, m.payload) for m in publisher.messages
+    ] == rows
+    assert all(row["published_at"] is not None for row in events(live))
+
+
 def test_event_is_marked_delivered_only_after_the_publisher_returns(
     db_engine, live
 ):
@@ -279,8 +317,6 @@ def record_events(db_engine, live, count):
             OutboxService.record(
                 db=db,
                 restaurant_id=live.r.restaurant_id,
-                aggregate_type=ORDER_AGGREGATE,
-                aggregate_id=order_id,
                 payload=PreparationStatusChangedV1(
                     preparation_id=uuid.uuid4(),
                     order_id=order_id,

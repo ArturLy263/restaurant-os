@@ -47,7 +47,10 @@ policy yet.
 
 The worker writes only the delivery columns, never the event's type,
 version, scope, aggregate or payload, and logs event metadata only, never
-payloads or error messages.
+payloads or error messages. It does not parse payloads either: whether a
+consumer supports an event's version is the consumer's concern
+(app.schemas.outbox.parse_payload), so an unsupported version is never
+dead-lettered here and never holds back its order.
 """
 
 import argparse
