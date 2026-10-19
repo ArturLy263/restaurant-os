@@ -1293,15 +1293,18 @@ class OrderService:
         return preparation
 
     @staticmethod
-    def get_station_preparations(
+    def ensure_station_visible(
         db: Session,
         restaurant_id: uuid.UUID,
         station_id: uuid.UUID,
         *,
         station_scope: frozenset[uuid.UUID] | None,
-    ) -> list[Preparation]:
-        """The station's open preparations; see update_preparation_status
-        for `station_scope`."""
+    ) -> Station:
+        """The restaurant's station, if `station_scope` includes it.
+
+        Used by the station queue and the station event stream. Raises
+        403 STATION_ACCESS_DENIED or 404 STATION_NOT_FOUND.
+        """
 
         # Checked before looking the station up, so the answer is the same
         # for unassigned, missing and other restaurants' stations.
@@ -1322,6 +1325,26 @@ class OrderService:
                 code=ErrorCode.STATION_NOT_FOUND,
                 message="Station not found",
             )
+
+        return station
+
+    @staticmethod
+    def get_station_preparations(
+        db: Session,
+        restaurant_id: uuid.UUID,
+        station_id: uuid.UUID,
+        *,
+        station_scope: frozenset[uuid.UUID] | None,
+    ) -> list[Preparation]:
+        """The station's open preparations; see update_preparation_status
+        for `station_scope`."""
+
+        OrderService.ensure_station_visible(
+            db,
+            restaurant_id,
+            station_id,
+            station_scope=station_scope,
+        )
 
         preparations = (
             db.query(Preparation)

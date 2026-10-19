@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import Depends, status
@@ -29,6 +30,23 @@ def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
+    return authenticate_token(db, credentials.credentials).user
+
+
+@dataclass(frozen=True)
+class AuthenticatedToken:
+    user: User
+    # The token's `exp` (rejected from then on); None if it has none.
+    expires_at: datetime | None
+
+
+def authenticate_token(db: Session, token: str) -> AuthenticatedToken:
+    """The active user an access token belongs to.
+
+    Raises ApiError 401 NOT_AUTHENTICATED for a missing, invalid, expired
+    or unknown-user token, and 403 USER_INACTIVE for an inactive user.
+    Shared by HTTP requests and WebSocket connections.
+    """
 
     credentials_exception = ApiError(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -38,8 +56,6 @@ def get_current_user(
             "WWW-Authenticate": "Bearer",
         },
     )
-
-    token = credentials.credentials
 
     try:
         payload = jwt.decode(
@@ -55,7 +71,15 @@ def get_current_user(
 
         user_uuid = UUID(user_id)
 
-    except (JWTError, ValueError):
+        # Past `exp` values were already rejected by jwt.decode.
+        exp = payload.get("exp")
+        expires_at = (
+            None
+            if exp is None
+            else datetime.fromtimestamp(int(exp), tz=timezone.utc)
+        )
+
+    except (JWTError, ValueError, TypeError, OverflowError):
         raise credentials_exception
 
     user = db.get(User, user_uuid)
@@ -70,7 +94,7 @@ def get_current_user(
             message="User is inactive",
         )
 
-    return user
+    return AuthenticatedToken(user=user, expires_at=expires_at)
 
 
 @dataclass(frozen=True)
@@ -89,6 +113,12 @@ def get_auth_context(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> AuthContext:
+    return build_auth_context(db, user)
+
+
+def build_auth_context(db: Session, user: User) -> AuthContext:
+    """The user's role, permissions and station scope, read now."""
+
     # The role is read from the database on every request (not from the
     # token's role_id claim), so a changed role applies immediately.
     role = db.get(Role, user.role_id)

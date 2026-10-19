@@ -33,6 +33,9 @@ _PURGE_RESTAURANT = [
     " SELECT id FROM categories WHERE restaurant_id = :r)",
     "DELETE FROM categories WHERE restaurant_id = :r",
     "DELETE FROM tables WHERE restaurant_id = :r",
+    "DELETE FROM station_assignments WHERE user_id IN ("
+    " SELECT id FROM users WHERE restaurant_id = :r)"
+    " OR station_id IN (SELECT id FROM stations WHERE restaurant_id = :r)",
     "DELETE FROM stations WHERE restaurant_id = :r",
     "DELETE FROM users WHERE restaurant_id = :r",
     "DELETE FROM roles WHERE restaurant_id = :r",

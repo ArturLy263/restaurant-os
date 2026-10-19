@@ -28,6 +28,18 @@ class Settings(BaseSettings):
     outbox_retention_days: int = Field(default=7, ge=1, le=3650)
     outbox_cleanup_batch_size: int = Field(default=1000, ge=1, le=10000)
 
+    # Station event streams (WebSocket, app.realtime).
+    # A new connection must authenticate within this time.
+    websocket_auth_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    # How often an open connection's authorization is checked again
+    # (user, role, station assignments); token expiry closes it at once.
+    websocket_reauth_interval_seconds: float = Field(default=30.0, gt=0, le=3600)
+    # Messages buffered per connection; a client that falls further
+    # behind is disconnected (it reconnects and reloads the queue).
+    websocket_queue_size: int = Field(default=100, ge=1, le=10000)
+    # Open connections per API process.
+    websocket_max_connections: int = Field(default=500, ge=1, le=100000)
+
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / ".env",
         env_file_encoding="utf-8",
