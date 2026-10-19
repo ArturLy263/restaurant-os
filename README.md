@@ -282,6 +282,40 @@ to show:
 stations whose preparations the user may work (`{id, name, type}`, only
 valid assignments): `null` means every station, `[]` none.
 
+#### Station queue
+
+`GET /api/v1/stations/{station_id}/preparations` lists the station's open
+preparations (`PENDING`, `IN_PROGRESS`, `READY`), oldest first, with what
+a kitchen or bar display shows:
+
+```json
+[
+  {
+    "id": "5b0e…",
+    "order_item_id": "a41c…",
+    "station_id": "e7d2…",
+    "status": "PENDING",
+    "created_at": "2026-10-19T12:00:00.123456",
+    "started_at": null,
+    "ready_at": null,
+    "order_id": "c93f…",
+    "table_number": 4,
+    "table_name": "Terrace",
+    "product_name": "Burger",
+    "quantity": 2,
+    "modifiers": [
+      {"modifier_id": "1d8a…", "name": "Bacon"},
+      {"modifier_id": "77b0…", "name": "Cheese"}
+    ]
+  }
+]
+```
+
+`modifiers` are the names stored when the item was added (sorted by
+name); `product_name` is the product's current name, since order items
+store no name of their own. `table_name` may be `null`. Prices are not
+included.
+
 ### Idempotency keys
 
 These mutations accept an `Idempotency-Key` header:
@@ -708,9 +742,11 @@ assume an event is new:
   reconnects (a bounded set is enough): an event can be delivered again,
   also to a later connection.
 - Key everything by `preparation_id`. `order.sent` adds its items as
-  `PENDING` preparations unless they are already present.
-  `preparation.status_changed` sets that preparation's status; `SERVED`
-  and `CANCELLED` remove it from the queue.
+  `PENDING` preparations unless they are already present; it carries ids
+  and quantities only, so reload the queue for what a display shows
+  (product, table, modifiers). `preparation.status_changed` sets that
+  preparation's status; `SERVED` and `CANCELLED` remove it from the
+  queue.
 - An event whose `previous_status` differs from the preparation's current
   status, or that names a preparation not in the queue, is already
   reflected in the loaded queue (or concerns a preparation that has left

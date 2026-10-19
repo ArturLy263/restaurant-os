@@ -24,6 +24,7 @@ from app.db.unit_of_work import commit
 from app.repositories.bill_repository import BillRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.table_repository import TableRepository
+from app.schemas.kitchen import PreparationQueueItem, PreparationQueueModifier
 from app.schemas.outbox import (
     OrderSentV1,
     PreparationStatusChangedV1,
@@ -1335,9 +1336,10 @@ class OrderService:
         station_id: uuid.UUID,
         *,
         station_scope: frozenset[uuid.UUID] | None,
-    ) -> list[Preparation]:
-        """The station's open preparations; see update_preparation_status
-        for `station_scope`."""
+    ) -> list[PreparationQueueItem]:
+        """The station's open preparations, oldest first, with what a
+        display shows for each; see update_preparation_status for
+        `station_scope`."""
 
         OrderService.ensure_station_visible(
             db,
@@ -1346,8 +1348,15 @@ class OrderService:
             station_scope=station_scope,
         )
 
-        preparations = (
-            db.query(Preparation)
+        rows = (
+            db.query(
+                Preparation,
+                OrderItem.order_id,
+                OrderItem.quantity,
+                Table.number,
+                Table.name,
+                Product.name,
+            )
             .join(
                 OrderItem,
                 Preparation.order_item_id == OrderItem.id,
@@ -1355,6 +1364,14 @@ class OrderService:
             .join(
                 Order,
                 OrderItem.order_id == Order.id,
+            )
+            .join(
+                Table,
+                Order.table_id == Table.id,
+            )
+            .join(
+                Product,
+                OrderItem.product_id == Product.id,
             )
             .filter(
                 Preparation.station_id == station_id,
@@ -1368,9 +1385,58 @@ class OrderService:
                 ),
             )
             .order_by(
-                Preparation.created_at.asc()
+                Preparation.created_at.asc(),
+                Preparation.id.asc(),
             )
             .all()
         )
 
-        return preparations
+        modifiers: dict[uuid.UUID, list[PreparationQueueModifier]] = {}
+
+        if rows:
+            for modifier in (
+                db.query(OrderItemModifier)
+                .filter(
+                    OrderItemModifier.order_item_id.in_(
+                        [preparation.order_item_id for preparation, *_ in rows]
+                    )
+                )
+                # By name: an item's modifiers are stored in no
+                # particular order.
+                .order_by(
+                    OrderItemModifier.name_snapshot.asc(),
+                    OrderItemModifier.id.asc(),
+                )
+            ):
+                modifiers.setdefault(modifier.order_item_id, []).append(
+                    PreparationQueueModifier(
+                        modifier_id=modifier.modifier_id,
+                        name=modifier.name_snapshot,
+                    )
+                )
+
+        return [
+            PreparationQueueItem(
+                id=preparation.id,
+                order_item_id=preparation.order_item_id,
+                station_id=preparation.station_id,
+                status=preparation.status,
+                created_at=preparation.created_at,
+                started_at=preparation.started_at,
+                ready_at=preparation.ready_at,
+                order_id=order_id,
+                table_number=table_number,
+                table_name=table_name,
+                product_name=product_name,
+                quantity=quantity,
+                modifiers=modifiers.get(preparation.order_item_id, []),
+            )
+            for (
+                preparation,
+                order_id,
+                quantity,
+                table_number,
+                table_name,
+                product_name,
+            ) in rows
+        ]
