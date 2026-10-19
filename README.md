@@ -27,6 +27,7 @@ alembic.ini                 Alembic configuration (run alembic from the repo roo
 docker-compose.yml          PostgreSQL 16 for local development (port 5433)
 pytest.ini                  pytest configuration and test markers
 backend/app/                FastAPI application (entry point: app.main:app)
+backend/app/realtime/       station event streams (WebSocket hub, fan-out)
 backend/alembic/            database migrations
 backend/requirements.txt    pinned runtime dependencies
 backend/requirements-test.txt  pinned test dependencies (includes runtime)
@@ -111,6 +112,11 @@ repository root.
    Check it with `curl http://127.0.0.1:8000/health`; the interactive API
    docs are at <http://127.0.0.1:8000/docs>. Log in as
    `admin@restaurantos.com` with `ADMIN_PASSWORD`.
+
+   The API delivers outbox events to station displays only with
+   `OUTBOX_WEBSOCKET_DELIVERY=true` (see
+   [Station event streams](#station-event-streams)); otherwise events
+   stay in the outbox until a worker delivers them.
 
 ## API conventions
 
@@ -358,7 +364,9 @@ below has delivered the event.
 
 The outbox is separate from the audit history. `operational_events`
 records who did what, for people; `outbox_events` is delivery data for
-systems, carries no actor and no free text, and is not exposed by the API.
+systems, carries no actor and no free text, and has no HTTP endpoint;
+station displays receive their events through
+[station event streams](#station-event-streams).
 
 | Event type | Version | Written when | Payload |
 | --- | --- | --- | --- |
@@ -451,8 +459,13 @@ stops it before it connects. In code, `OutboxWorker(engine, publisher,
 ...)` offers `process_batch()` (one bounded pass) and `run(stop_event)`.
 
 A publisher is any object with `publish(message)`: returning means
-delivered, raising means not. The only transport so far,
-`LoggingPublisher`, logs event metadata (never payloads).
+delivered, raising means not. The standalone runner uses
+`LoggingPublisher`, which logs event metadata (never payloads); the API
+process uses `StationEventPublisher` to deliver to station displays (see
+[Station event streams](#station-event-streams)). While
+`OUTBOX_WEBSOCKET_DELIVERY` is enabled the standalone `run` command
+refuses to start (exit status 2), so the two never split the events
+between them; `cleanup` is unaffected.
 
 Settings (environment or `.env`; out-of-range values are rejected):
 
@@ -531,11 +544,157 @@ with the same care as the payload.
 
 **Retention:** `cleanup` deletes events delivered more than
 `OUTBOX_RETENTION_DAYS` ago (never less than one day), oldest delivery
-first, in transactions of at most `OUTBOX_CLEANUP_BATCH_SIZE` rows
-(`DELETE ... WHERE id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)`),
-at most `--max-batches` (default 100) per run. Undelivered and
+first, in transactions of at most `OUTBOX_CLEANUP_BATCH_SIZE` rows (each
+selects up to that many ids `FOR UPDATE SKIP LOCKED`, then deletes
+exactly those ids), at most `--max-batches` (default 100) per run. Undelivered and
 dead-lettered events are never deleted. It runs only when invoked, e.g.
 from cron: `cd backend && python -m app.workers.outbox_worker cleanup`.
+
+### Station event streams
+
+Kitchen and bar displays receive their station's outbox events over a
+WebSocket, `/api/v1/stations/{station_id}/events`, one connection per
+station. Code: `backend/app/realtime/` (`stream.py` protocol, `hub.py`
+connections, `publisher.py` routing, `delivery.py` worker thread).
+
+#### Running
+
+Delivery to streams runs **inside the API process**, because that is
+where the connections are:
+
+```bash
+# API with station event delivery (one process, no --workers N)
+OUTBOX_WEBSOCKET_DELIVERY=true uvicorn app.main:app --app-dir backend
+
+# Retention cleanup stays a separate command, e.g. from cron
+cd backend && python -m app.workers.outbox_worker cleanup
+```
+
+The application's lifespan starts one `OutboxWorker` thread
+(`outbox-station-delivery`, using the `OUTBOX_*` settings of the delivery
+worker) when the server starts, and stops it on shutdown after the event
+being delivered. Importing `app.main` starts nothing, and with the
+setting off (the default) no events are delivered by the API. Do not run
+`python -m app.workers.outbox_worker run` at the same time (it refuses to
+start), and do not enable delivery in more than one API process: each
+process only knows its own connections, so events claimed by one process
+never reach displays connected to another. Spreading connections over
+several processes needs a shared broker, which this design deliberately
+does not have.
+
+#### Authentication
+
+1. Open the WebSocket. Within `WEBSOCKET_AUTH_TIMEOUT_SECONDS` send, as
+   the first (text) message:
+
+   ```json
+   {"type": "authenticate", "token": "<access token from POST /api/v1/auth/login>"}
+   ```
+
+   The token is the same as `Authorization: Bearer` on HTTP. It is never
+   put in the URL (browsers cannot set headers on WebSockets, and URLs
+   end up in access logs) and never logged. Tokens without an expiry are
+   refused for streams.
+2. The server answers `{"type": "subscribed", "station_id": "..."}` or
+   closes the connection (codes below). Anything the client sends later
+   is ignored; there is no way to change station on a connection.
+
+#### Authorization
+
+A stream is authorized exactly like `GET /api/v1/stations/{station_id}/
+preparations`, by the same code: the user must be active and have
+`preparations:view` (Kitchen, Bar, Manager, Admin; not Waiter or
+Cashier); a user without `preparations:all_stations` only gets stations
+in their [station scope](#station-scope), checked before the station is
+looked up; and the station must belong to the user's restaurant. Tenant,
+role and stations are read from the database, never from the client.
+
+An open stream is authorized again every
+`WEBSOCKET_REAUTH_INTERVAL_SECONDS` (default 30), so a deactivated user,
+a changed role or, for station-scoped users, a removed assignment or a
+deactivated station closes it within that time (as on HTTP, users with
+`preparations:all_stations` may view inactive stations); it is closed
+when the token expires.
+
+| Close code | Reason | Meaning |
+| --- | --- | --- |
+| 4401 | `NOT_AUTHENTICATED` | no, malformed, invalid or expired token; auth timeout |
+| 4403 | `USER_INACTIVE`, `PERMISSION_DENIED`, `STATION_ACCESS_DENIED` | as the HTTP 403 with that code |
+| 4404 | `STATION_NOT_FOUND` | no such station in the user's restaurant (all-station users) |
+| 4429 | `SLOW_CONSUMER` | the client fell `WEBSOCKET_QUEUE_SIZE` messages behind |
+| 1013 | `TOO_MANY_CONNECTIONS` | the process has `WEBSOCKET_MAX_CONNECTIONS` streams |
+
+#### Messages
+
+```json
+{"type": "event", "id": "<outbox event id>", "event_type": "order.sent",
+ "schema_version": 1, "aggregate_type": "order", "aggregate_id": "<order id>",
+ "created_at": "2026-10-19T12:00:00.123456+00:00", "payload": {"...": "..."}}
+
+{"type": "resync_required", "reason": "UNSUPPORTED_EVENT",
+ "event_id": "...", "event_type": "...", "schema_version": 2}
+```
+
+`payload` follows the [event contract](#event-contracts) of its type and
+version. Routing never leaves the event's restaurant:
+`preparation.status_changed` goes to the preparation's station only;
+`order.sent` goes to each station with items in that round, each getting
+an `order.sent` with **only its own items**. Nothing is broadcast to the
+whole restaurant except `resync_required`, which carries no payload.
+
+#### Delivery semantics
+
+- **Delivered is not received.** The outbox marks an event delivered once
+  it is in the buffers of the streams open in this process at that
+  moment, possibly none. A display that is offline, reconnecting or was
+  disconnected misses those events. **After every (re)connect a display
+  must reload its queue with `GET /api/v1/stations/{id}/preparations`,
+  then apply events.** A successful WebSocket send is not proof that the
+  display processed or stored anything.
+- **At least once.** The same event can arrive twice with the same `id`
+  (worker crash after delivering, timed-out delivery): deduplicate on
+  `id`.
+- **Order.** One order's events arrive in the order they were committed
+  (the worker delivers each order's events in order; each stream is
+  FIFO). There is no order across orders.
+- **Unsupported versions.** An `(event_type, schema_version)` this API
+  version does not support cannot be routed, so it is not sent. Every
+  open stream of the restaurant gets `resync_required` (reload over
+  HTTP), the event is marked delivered and a warning is logged: no retry
+  loop, no dead letter, no blocked order.
+- **Malformed payloads** of a supported version (a producer bug) fail the
+  delivery: the worker retries with backoff and dead-letters the event
+  after `OUTBOX_MAX_ATTEMPTS`. No stream receives it, and it holds back
+  its order's later events (see [Delivery worker](#delivery-worker) for
+  inspecting dead letters). There is no recovery operation, deliberately
+  not over the API, until its authorization is designed.
+- **Slow clients** are disconnected (4429) once `WEBSOCKET_QUEUE_SIZE`
+  messages are waiting for them, instead of buffering without limit;
+  other clients and the worker are not slowed down.
+
+| Variable | Default | Allowed | Meaning |
+| --- | --- | --- | --- |
+| `OUTBOX_WEBSOCKET_DELIVERY` | false | true/false | run delivery to streams in this API process |
+| `WEBSOCKET_AUTH_TIMEOUT_SECONDS` | 10 | >0-60 | time to send the authenticate message |
+| `WEBSOCKET_REAUTH_INTERVAL_SECONDS` | 30 | >0-3600 | how often open streams are re-authorized |
+| `WEBSOCKET_QUEUE_SIZE` | 100 | 1-10000 | messages buffered per stream before 4429 |
+| `WEBSOCKET_MAX_CONNECTIONS` | 500 | 1-100000 | streams per API process before 1013 |
+
+#### Local development and testing
+
+- With `OUTBOX_WEBSOCKET_DELIVERY=true` against your development
+  database, the API marks that database's outbox events delivered (it
+  writes the delivery columns only). Leave it off unless you are trying
+  the displays.
+- The tests never use the development database:
+  `backend/tests/integration/test_station_event_stream.py`
+  (authentication, scope, revocation, cleanup) and
+  `test_station_event_fanout.py` (routing, ordering, unsupported and
+  malformed events, slow clients, the in-process runner) use committed
+  data in the test database; `backend/tests/unit/test_station_event_hub.py`
+  and `test_station_event_publisher.py` need no database.
+- uvicorn needs a WebSocket protocol library to accept upgrades;
+  `wsproto` is pinned in `backend/requirements.txt`.
 
 ## Tests
 

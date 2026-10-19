@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -30,7 +31,9 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         if runner is not None:
-            runner.stop()
+            # Waits for the event being delivered; off the event loop, so
+            # closing streams are not blocked meanwhile.
+            await asyncio.to_thread(runner.stop)
 
 
 app = FastAPI(
