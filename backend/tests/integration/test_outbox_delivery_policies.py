@@ -431,6 +431,39 @@ def test_cleanup_stops_after_max_batches(db_engine, retention):
     assert remaining(a) == retention.kept
 
 
+def test_cleanup_batch_bound_does_not_depend_on_table_statistics(
+    db_engine, committed_restaurants
+):
+    """Regression: with statistics saying the table is almost empty,
+    PostgreSQL ran `DELETE ... WHERE id IN (SELECT ... LIMIT n FOR UPDATE
+    SKIP LOCKED)` as a nested loop that re-ran the subquery for every
+    row; each re-run skipped the rows already deleted and picked new
+    ones, so one batch deleted every eligible event."""
+
+    a = Live(db_engine, committed_restaurants("A"))
+    record_events(db_engine, a, 1)
+
+    with db_engine.connect() as connection:
+        connection.execute(text("ANALYZE outbox_events"))
+        connection.commit()
+
+    record_events(db_engine, a, 5)
+    old = [row["id"] for row in events(a)[1:]]
+    # Oldest first, as the table stores them: the order that over-deleted.
+    for days, event_id in zip((10.5, 9.5, 8.5, 7.5, 6.5), old):
+        delivered_ago(a, [event_id], timedelta(days=days))
+
+    deleted = delete_delivered_events(
+        db_engine,
+        older_than=timedelta(days=2),
+        batch_size=2,
+        restaurant_id=a.r.restaurant_id,
+    )
+
+    assert deleted == 2
+    assert remaining(a) == {events(a)[0]["id"]} | set(old[2:])
+
+
 def test_cleanup_respects_the_retention_period(db_engine, retention):
     deleted = delete_delivered_events(
         db_engine,

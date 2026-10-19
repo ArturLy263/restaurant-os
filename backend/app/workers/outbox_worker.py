@@ -495,9 +495,19 @@ def delete_delivered_events(
     if restaurant_id is not None:
         eligible = eligible.where(OutboxEvent.restaurant_id == restaurant_id)
 
+    # Two statements, not `DELETE ... WHERE id IN (eligible)`: PostgreSQL
+    # may re-run that subquery once per row (a nested loop, chosen from
+    # table statistics), and each re-run skips the rows already deleted
+    # and locks new ones, so one batch could delete every eligible event.
+    # The ids stay locked until the commit.
     with engine.begin() as connection:
+        ids = connection.execute(eligible).scalars().all()
+
+        if not ids:
+            return 0
+
         deleted = connection.execute(
-            delete(OutboxEvent).where(OutboxEvent.id.in_(eligible.scalar_subquery()))
+            delete(OutboxEvent).where(OutboxEvent.id.in_(ids))
         )
 
     return deleted.rowcount
