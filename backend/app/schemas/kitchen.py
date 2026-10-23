@@ -34,3 +34,8 @@ class PreparationQueueItem(BaseModel):
     product_name: str
     quantity: int
     modifiers: list[PreparationQueueModifier]
+    # The order's status and its bill's (null before billing). A CLOSED
+    # order is fully paid; its open preparations stay in the queue until
+    # served or discarded, since payment is not service.
+    order_status: str
+    bill_status: str | None

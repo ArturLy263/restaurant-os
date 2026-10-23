@@ -1398,6 +1398,8 @@ class OrderService:
                 Table.number,
                 Table.name,
                 Product.name,
+                Order.status,
+                Bill.status,
             )
             .join(
                 OrderItem,
@@ -1414,6 +1416,11 @@ class OrderService:
             .join(
                 Product,
                 OrderItem.product_id == Product.id,
+            )
+            # At most one bill per order (bills.order_id is unique).
+            .outerjoin(
+                Bill,
+                Bill.order_id == Order.id,
             )
             .filter(
                 Preparation.station_id == station_id,
@@ -1472,6 +1479,8 @@ class OrderService:
                 product_name=product_name,
                 quantity=quantity,
                 modifiers=modifiers.get(preparation.order_item_id, []),
+                order_status=order_status,
+                bill_status=bill_status,
             )
             for (
                 preparation,
@@ -1480,5 +1489,7 @@ class OrderService:
                 table_number,
                 table_name,
                 product_name,
+                order_status,
+                bill_status,
             ) in rows
         ]

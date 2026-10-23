@@ -27,6 +27,8 @@ QUEUE_FIELDS = {
     "product_name",
     "quantity",
     "modifiers",
+    "order_status",
+    "bill_status",
 }
 
 
@@ -237,3 +239,59 @@ def test_queue_shows_only_its_restaurants_work(pos, db_session, restaurant):
     )
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "STATION_NOT_FOUND"
+
+
+# --- Payment is not service ---
+
+
+def statuses(entries):
+    return [(e["status"], e["order_status"], e["bill_status"]) for e in entries]
+
+
+def test_queue_shows_the_order_and_bill_status(pos, restaurant):
+    order_id, burger_id, coke_id = pos.sent_order()
+
+    assert statuses(queue(pos, restaurant.station)) == [
+        ("PENDING", "SENT", None),
+        ("PENDING", "SENT", None),
+    ]
+
+    bill_id = pos.create_bill(order_id).json()["id"]
+
+    assert statuses(queue(pos, restaurant.station)) == [
+        ("PENDING", "SENT", "OPEN"),
+        ("PENDING", "SENT", "OPEN"),
+    ]
+
+    # A partial payment changes neither status.
+    assert pos.pay(bill_id, "5.00").status_code == 201
+    assert statuses(queue(pos, restaurant.station)) == [
+        ("PENDING", "SENT", "OPEN"),
+        ("PENDING", "SENT", "OPEN"),
+    ]
+
+
+def test_paid_orders_unfinished_preparations_stay_in_the_queue(pos, restaurant):
+    order_id, burger_id, coke_id = pos.sent_order()
+    pos.start_preparation(burger_id, "start", "ready")
+    bill_id = pos.create_bill(order_id).json()["id"]
+
+    # The final payment is allowed while preparations are unfinished.
+    assert pos.pay(bill_id, "15.00").status_code == 201
+    assert pos.order(order_id).status == "CLOSED"
+
+    entries = queue(pos, restaurant.station)
+
+    assert [(e["order_item_id"], e["status"]) for e in entries] == [
+        (burger_id, "READY"),
+        (coke_id, "PENDING"),
+    ]
+    assert {(e["order_status"], e["bill_status"]) for e in entries} == {
+        ("CLOSED", "PAID")
+    }
+
+    # Kitchen work continues after payment; served items leave the queue.
+    pos.start_preparation(burger_id, "serve")
+    pos.start_preparation(coke_id, "start", "ready", "serve")
+
+    assert queue(pos, restaurant.station) == []
