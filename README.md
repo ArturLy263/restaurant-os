@@ -181,6 +181,7 @@ user's role takes effect without a new token.
 | `preparations:update` | `POST /preparations/{id}/start`, `/ready` | | ✓ | ✓ | | ✓ |
 | `preparations:serve` | `POST /preparations/{id}/serve` | ✓ | ✓ | ✓ | | ✓ |
 | `preparations:all_stations` | every station, not only assigned ones (see below) | ✓ | | | | ✓ |
+| `preparations:discard` | `POST /preparations/{id}/discard` (paid orders only, see below) | | | | | ✓ |
 | `bills:create` | `POST /bills/order/{order_id}` | | | | ✓ | ✓ |
 | `bills:adjust` | `POST /bills/{id}/items/{item_id}/cancel`; voiding a billed order | | | | ✓ | ✓ |
 | `bills:view` | `GET /bills/{id}` | | | | ✓ | ✓ |
@@ -322,7 +323,9 @@ a kitchen or bar display shows:
     "modifiers": [
       {"modifier_id": "1d8a…", "name": "Bacon"},
       {"modifier_id": "77b0…", "name": "Cheese"}
-    ]
+    ],
+    "order_status": "SENT",
+    "bill_status": null
   }
 ]
 ```
@@ -330,7 +333,53 @@ a kitchen or bar display shows:
 `modifiers` are the names stored when the item was added (sorted by
 name); `product_name` is the product's current name, since order items
 store no name of their own. `table_name` may be `null`. Prices are not
-included.
+included. `order_status` is the order's status and `bill_status` its
+bill's (`null` before the order is billed).
+
+#### Payment is not service
+
+The final payment closes the order (`CLOSED`, bill `PAID`) even while
+some of its preparations are unfinished: paying never waits for the
+kitchen, and payment never marks anything served. Those preparations stay
+in the station queue, with `order_status` `CLOSED` (displays mark them as
+paid), and continue through start, ready and serve as usual. Nothing
+expires or is hidden automatically.
+
+If such a dish will never be served (e.g. the guest left), a manager
+discards it:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/preparations/$PREPARATION_ID/discard \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"reason": "Guest left before the dish was served"}'
+```
+
+- Needs `preparations:discard` (MANAGER and ADMIN only); `reason` is
+  required (1-500 characters) and recorded in the
+  `preparation.discarded` audit event, never in outbox events.
+- The preparation becomes `CANCELLED` and leaves the queue. Its order item
+  (`SENT`) and the paid bill are unchanged: there is no refund or bill
+  adjustment.
+- 409 `ORDER_NOT_CLOSED` unless the order is fully paid and `CLOSED`
+  (including after a partial payment); before that, items are cancelled
+  through the order or bill instead. 409 `INVALID_PREPARATION_TRANSITION`
+  for a preparation that is already `SERVED` or `CANCELLED`. Another
+  restaurant's preparation is 404 `PREPARATION_NOT_FOUND`.
+- Like every preparation change it locks the order first, so it cannot
+  overtake a payment in progress, and a serve queued behind it gets 409.
+
+#### Stations when sending
+
+Sending an order routes each new item to its product's station, which
+must belong to the order's restaurant and be active. Sending is all or
+nothing: one item that cannot be routed rejects the whole send.
+
+- 409 `PRODUCT_HAS_NO_STATION`: the product has no station, or its
+  station belongs to another restaurant (reported the same way, so
+  nothing about the other restaurant is revealed).
+- 409 `STATION_INACTIVE` (`"Station Bar is inactive"`): the station is
+  deactivated. Adding such an item is still allowed; it can be sent once
+  the station is active again.
 
 ### Idempotency keys
 
@@ -344,6 +393,7 @@ These mutations accept an `Idempotency-Key` header:
 | Cancel a billed item (bill adjustment) | `POST /api/v1/bills/{bill_id}/items/{item_id}/cancel` |
 | Void (cancel) an order | `POST /api/v1/orders/{order_id}/void` |
 | Take a payment (closes the order when fully paid) | `POST /api/v1/bills/{bill_id}/payments` |
+| Discard a paid order's preparation | `POST /api/v1/preparations/{preparation_id}/discard` |
 
 Clients should generate a new key (e.g. a UUID) for each operation and
 reuse it only when retrying that same operation, for example after a
@@ -405,6 +455,25 @@ curl -X POST http://127.0.0.1:8000/api/v1/bills/$BILL_ID/payments \
   them. Such tables stay `OCCUPIED` and simply reject new orders until
   their orders are closed or voided.
 
+### Tenant consistency
+
+Every record belongs to one restaurant, and PostgreSQL triggers (migration
+`e1b7d3a9c4f2`) reject rows that would link two restaurants:
+
+| Table | Rule | Constraint name in the error |
+| --- | --- | --- |
+| `preparations` | the station belongs to the order's restaurant | `ck_preparations_station_restaurant` |
+| `order_items` | the product (through its category) belongs to the order's restaurant | `ck_order_items_product_restaurant` |
+| `products` | the station, if set, belongs to the category's restaurant | `ck_products_station_restaurant` |
+
+A violation is a `check_violation`; the API checks these rules itself
+first, so the triggers are a backstop. They fire on `INSERT` and on
+`UPDATE OF` the linking columns only: rows written before the migration
+are not re-validated, and other updates of them (e.g. a status change)
+keep working. The upgrade logs existing violating rows as warnings and
+changes no data. Changing the `restaurant_id` of an order, station or
+category is not checked.
+
 ### Transactional outbox
 
 Selected mutations also write an integration event to the
@@ -421,7 +490,8 @@ station displays receive their events through
 | Event type | Version | Written when | Payload |
 | --- | --- | --- | --- |
 | `order.sent` | 1 | an order's new items are sent (`POST /orders/{id}/send`) | `order_id`, `table_id`, `initial`, `items[]`: `order_item_id`, `preparation_id`, `station_id`, `product_id`, `quantity` |
-| `preparation.status_changed` | 1 | a preparation is started, ready or served, or cancelled with its item | `preparation_id`, `order_id`, `order_item_id`, `station_id`, `previous_status`, `status` |
+| `preparation.status_changed` | 1 | a preparation is started, ready or served, cancelled with its item, or discarded while `PENDING`/`IN_PROGRESS` | `preparation_id`, `order_id`, `order_item_id`, `station_id`, `previous_status`, `status` |
+| `preparation.status_changed` | 2 | a `READY` preparation of a paid order is discarded (`READY`->`CANCELLED`) | same as v1 |
 
 Every event has a stable `id` (consumers deduplicate on it), its
 `event_type` and `schema_version`, the `restaurant_id` it belongs to, its
@@ -443,7 +513,10 @@ hyphenated UUIDs, no missing or unknown fields, and the version's rules.
 v1 requires `quantity` >= 1 and at least one sent item, each item and
 preparation once, and only the five transitions it describes
 (`PENDING`->`IN_PROGRESS`->`READY`->`SERVED`, `PENDING`/`IN_PROGRESS`->
-`CANCELLED`). Every event is checked to parse back before it is written;
+`CANCELLED`). `preparation.status_changed` v2 has the same fields and
+also allows `READY`->`CANCELLED`; producers write the lowest version that
+describes a change, so only discarding a ready dish produces v2. Every
+event is checked to parse back before it is written;
 one that does not fails the change (500) like any outbox failure.
 
 Consumers call `parse_payload(event_type, schema_version, payload)`:
@@ -473,8 +546,8 @@ Compatibility rules for changing a contract:
   new `event_type`, not a new version.
 - Event types are added only together with a consumer.
 
-`backend/tests/unit/test_event_contracts.py` holds a golden v1 payload
-per contract; they must keep parsing and dumping unchanged.
+`backend/tests/unit/test_event_contracts.py` holds a golden payload per
+contract; they must keep parsing and dumping unchanged.
 
 - **Atomic:** the event is written in the same transaction as the change
   it describes (and its audit events and Idempotency-Key result). A
@@ -682,7 +755,7 @@ when the token expires.
  "created_at": "2026-10-19T12:00:00.123456+00:00", "payload": {"...": "..."}}
 
 {"type": "resync_required", "reason": "UNSUPPORTED_EVENT",
- "event_id": "...", "event_type": "...", "schema_version": 2}
+ "event_id": "...", "event_type": "...", "schema_version": 3}
 ```
 
 `payload` follows the [event contract](#event-contracts) of its type and
@@ -760,9 +833,9 @@ assume an event is new:
 - Key everything by `preparation_id`. `order.sent` adds its items as
   `PENDING` preparations unless they are already present; it carries ids
   and quantities only, so reload the queue for what a display shows
-  (product, table, modifiers). `preparation.status_changed` sets that
-  preparation's status; `SERVED` and `CANCELLED` remove it from the
-  queue.
+  (product, table, modifiers). `preparation.status_changed` (v1 or v2)
+  sets that preparation's status; `SERVED` and `CANCELLED` remove it from
+  the queue.
 - An event whose `previous_status` differs from the preparation's current
   status, or that names a preparation not in the queue, is already
   reflected in the loaded queue (or concerns a preparation that has left
@@ -859,7 +932,8 @@ REQUIRE_TEST_DATABASE=1 pytest
 - the migration history has a single head,
 - upgrading from an empty database to head and downgrading back to base
   works, leaving the schema empty,
-- every migration's downgrade exactly reverses its upgrade,
+- every migration's downgrade exactly reverses its upgrade (tables,
+  keys, indexes, triggers and functions),
 - the SQLAlchemy models match the migrated schema (the equivalent of
   `alembic check`).
 
