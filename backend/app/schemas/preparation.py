@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PreparationResponse(BaseModel):
@@ -14,3 +14,9 @@ class PreparationResponse(BaseModel):
     ready_at: datetime | None
     served_at: datetime | None
     cancelled_at: datetime | None
+
+
+class DiscardPreparationRequest(BaseModel):
+    # Recorded in the audit trail (operational_events), never in outbox
+    # events.
+    reason: str = Field(..., min_length=1, max_length=500)

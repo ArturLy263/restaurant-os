@@ -58,6 +58,7 @@ from app.schemas.outbox import (
     OrderSentV1,
     OutboxPayload,
     PreparationStatusChangedV1,
+    PreparationStatusChangedV2,
     UnsupportedEventError,
     parse_payload,
 )
@@ -82,7 +83,9 @@ def _route_order_sent(payload: OrderSentV1):
         )
 
 
-def _route_status_changed(payload: PreparationStatusChangedV1):
+def _route_status_changed(
+    payload: PreparationStatusChangedV1 | PreparationStatusChangedV2,
+):
     yield payload.station_id, payload
 
 
@@ -93,6 +96,7 @@ ROUTES: dict[
 ] = {
     OrderSentV1: _route_order_sent,
     PreparationStatusChangedV1: _route_status_changed,
+    PreparationStatusChangedV2: _route_status_changed,
 }
 
 

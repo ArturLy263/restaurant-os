@@ -394,6 +394,7 @@ def test_event_types_and_versions_are_unique():
     assert sorted(contracts) == [
         ("order.sent", 1),
         ("preparation.status_changed", 1),
+        ("preparation.status_changed", 2),
     ]
     assert len(set(contracts)) == len(contracts)
 

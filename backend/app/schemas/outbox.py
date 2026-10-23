@@ -157,8 +157,10 @@ class PreparationStatusChangedV1(OutboxPayload):
 
     One event per successful change: PENDING -> IN_PROGRESS -> READY ->
     SERVED through the preparation endpoints, and PENDING/IN_PROGRESS ->
-    CANCELLED when its order item is cancelled. Rejected transitions
-    create no event. Preparations are created PENDING by `order.sent`.
+    CANCELLED when its order item is cancelled or the preparation of a
+    fully paid order is discarded (READY -> CANCELLED is v2). Rejected
+    transitions create no event. Preparations are created PENDING by
+    `order.sent`.
     """
 
     event_type: ClassVar[str] = "preparation.status_changed"
@@ -184,6 +186,55 @@ class PreparationStatusChangedV1(OutboxPayload):
         return self
 
 
+# v2 adds one transition: READY -> CANCELLED, when a fully paid order's
+# ready preparation is discarded.
+PREPARATION_TRANSITIONS_V2 = PREPARATION_TRANSITIONS_V1 | {
+    ("READY", "CANCELLED"),
+}
+
+
+class PreparationStatusChangedV2(OutboxPayload):
+    """`preparation.status_changed` v2: v1 plus READY -> CANCELLED.
+
+    Same fields and meaning as v1. Producers write v1 whenever v1 describes
+    the transition, so only READY -> CANCELLED (discarding a ready
+    preparation of a fully paid order) is written as v2; consumers that
+    know only v1 are unaffected by every other change.
+    """
+
+    event_type: ClassVar[str] = "preparation.status_changed"
+    schema_version: ClassVar[int] = 2
+    aggregate_type: ClassVar[str] = ORDER_AGGREGATE
+
+    preparation_id: uuid.UUID
+    order_id: uuid.UUID
+    order_item_id: uuid.UUID
+    station_id: uuid.UUID
+    previous_status: PreparationStatus
+    status: PreparationStatus
+
+    @property
+    def aggregate_id(self) -> uuid.UUID:
+        return self.order_id
+
+    @model_validator(mode="after")
+    def _is_a_v2_transition(self):
+        if (self.previous_status, self.status) not in PREPARATION_TRANSITIONS_V2:
+            raise ValueError("not a v2 preparation transition")
+
+        return self
+
+
+def preparation_status_changed(**fields) -> OutboxPayload:
+    """The lowest version of `preparation.status_changed` that describes
+    the transition (v1, or v2 for READY -> CANCELLED)."""
+
+    if (fields["previous_status"], fields["status"]) in PREPARATION_TRANSITIONS_V1:
+        return PreparationStatusChangedV1(**fields)
+
+    return PreparationStatusChangedV2(**fields)
+
+
 def _register(*contracts: type[OutboxPayload]):
     registry: dict[tuple[str, int], type[OutboxPayload]] = {}
 
@@ -202,6 +253,7 @@ def _register(*contracts: type[OutboxPayload]):
 CONTRACTS: Mapping[tuple[str, int], type[OutboxPayload]] = _register(
     OrderSentV1,
     PreparationStatusChangedV1,
+    PreparationStatusChangedV2,
 )
 
 

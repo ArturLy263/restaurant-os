@@ -147,6 +147,25 @@ def test_wire_messages_carry_only_the_envelope_and_payload(streams):
     streams(scenario)
 
 
+def test_v2_status_change_reaches_only_its_station(streams):
+    def scenario(hub, publisher, sub):
+        kitchen, bar = sub(STATION), sub(BAR)
+        payload = {
+            **GOLDEN[("preparation.status_changed", 2)],
+            "station_id": str(BAR),
+        }
+
+        publisher.publish(message("preparation.status_changed", 2, payload))
+
+        assert kitchen.drain() == []
+        [wire] = bar.drain()
+        assert wire["type"] == "event"
+        assert wire["schema_version"] == 2
+        assert wire["payload"] == payload
+
+    streams(scenario)
+
+
 def test_status_change_reaches_only_its_station(streams):
     def scenario(hub, publisher, sub):
         kitchen, other_kitchen, bar = sub(STATION), sub(STATION), sub(BAR)

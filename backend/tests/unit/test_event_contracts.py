@@ -1,6 +1,7 @@
 """Outbox event contracts (Epic D3): versions, validation, compatibility.
 
-The golden payloads below are v1 as written since D1. They must keep
+The golden payloads below are as written since each version was added
+(v1 since D1, preparation.status_changed v2 for discards). They must keep
 parsing to the same model and dumping to the same JSON: a change that
 breaks them is a new version, not an edit (see app.schemas.outbox).
 """
@@ -14,15 +15,18 @@ from app.schemas.outbox import (
     CONTRACTS,
     ORDER_AGGREGATE,
     PREPARATION_TRANSITIONS_V1,
+    PREPARATION_TRANSITIONS_V2,
     EventContractError,
     InvalidEventPayloadError,
     OrderSentV1,
     OutboxPayload,
     PreparationStatusChangedV1,
+    PreparationStatusChangedV2,
     SentOrderItem,
     UnsupportedEventError,
     dump_payload,
     parse_payload,
+    preparation_status_changed,
 )
 
 
@@ -65,6 +69,14 @@ GOLDEN = {
         "previous_status": "PENDING",
         "status": "IN_PROGRESS",
     },
+    ("preparation.status_changed", 2): {
+        "preparation_id": PREP_1,
+        "order_id": ORDER,
+        "order_item_id": ITEM_1,
+        "station_id": STATION,
+        "previous_status": "READY",
+        "status": "CANCELLED",
+    },
 }
 
 
@@ -97,6 +109,7 @@ def test_registry_lists_exactly_the_supported_contracts():
     assert dict(CONTRACTS) == {
         ("order.sent", 1): OrderSentV1,
         ("preparation.status_changed", 1): PreparationStatusChangedV1,
+        ("preparation.status_changed", 2): PreparationStatusChangedV2,
     }
 
     # Every payload model is registered under its own type and version.
@@ -134,7 +147,7 @@ def test_golden_payloads_parse_and_dump_unchanged(key):
     [
         ("order.sent", 2),
         ("order.sent", 0),
-        ("preparation.status_changed", 2),
+        ("preparation.status_changed", 3),
         ("order.closed", 1),
         ("ORDER.SENT", 1),
         ("", 1),
@@ -246,6 +259,75 @@ def test_every_v1_transition_is_accepted(transition):
     )
 
     assert (model.previous_status, model.status) == transition
+
+
+def test_v1_does_not_describe_ready_to_cancelled():
+    with pytest.raises(InvalidEventPayloadError):
+        parse_payload(
+            "preparation.status_changed",
+            1,
+            changed(previous_status="READY", status="CANCELLED"),
+        )
+
+
+def test_v2_is_v1_plus_ready_to_cancelled():
+    assert PREPARATION_TRANSITIONS_V2 == PREPARATION_TRANSITIONS_V1 | {
+        ("READY", "CANCELLED")
+    }
+
+
+@pytest.mark.parametrize("transition", sorted(PREPARATION_TRANSITIONS_V2))
+def test_every_v2_transition_is_accepted(transition):
+    previous_status, status = transition
+
+    model = parse_payload(
+        "preparation.status_changed",
+        2,
+        changed(previous_status=previous_status, status=status),
+    )
+
+    assert type(model) is PreparationStatusChangedV2
+    assert (model.previous_status, model.status) == transition
+
+
+@pytest.mark.parametrize(
+    "transition",
+    [("SERVED", "CANCELLED"), ("CANCELLED", "PENDING"), ("PENDING", "READY")],
+)
+def test_v2_rejects_other_transitions(transition):
+    previous_status, status = transition
+
+    with pytest.raises(InvalidEventPayloadError):
+        parse_payload(
+            "preparation.status_changed",
+            2,
+            changed(previous_status=previous_status, status=status),
+        )
+
+
+@pytest.mark.parametrize(
+    "transition, version",
+    [
+        (("PENDING", "CANCELLED"), 1),
+        (("IN_PROGRESS", "CANCELLED"), 1),
+        (("READY", "SERVED"), 1),
+        (("READY", "CANCELLED"), 2),
+    ],
+)
+def test_producers_write_the_lowest_version_describing_a_change(transition, version):
+    previous_status, status = transition
+
+    model = preparation_status_changed(
+        preparation_id=PREP_1,
+        order_id=ORDER,
+        order_item_id=ITEM_1,
+        station_id=STATION,
+        previous_status=previous_status,
+        status=status,
+    )
+
+    assert model.schema_version == version
+    assert parse_payload(model.event_type, version, dump_payload(model)) == model
 
 
 def test_validation_is_deterministic():

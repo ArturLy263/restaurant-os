@@ -53,6 +53,8 @@ ENDPOINTS = [
      "preparations:update", STATION_STAFF | MANAGEMENT),
     ("POST", f"/api/v1/preparations/{_ID}/serve", None,
      "preparations:serve", {"WAITER"} | STATION_STAFF | MANAGEMENT),
+    ("POST", f"/api/v1/preparations/{_ID}/discard", {"reason": "x"},
+     "preparations:discard", MANAGEMENT),
     ("POST", f"/api/v1/bills/order/{_ID}", None,
      "bills:create", {"CASHIER"} | MANAGEMENT),
     ("GET", f"/api/v1/bills/{_ID}", None,

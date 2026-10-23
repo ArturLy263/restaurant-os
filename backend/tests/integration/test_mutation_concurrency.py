@@ -538,3 +538,111 @@ def test_preparation_transition_waits_for_a_queued_cancellation(db_engine, live)
     [event] = live.outbox("preparation.status_changed")
     assert event["payload"]["previous_status"] == "PENDING"
     assert event["payload"]["status"] == "CANCELLED"
+
+
+# --- Payment, serve and discard share the order lock ---
+
+
+def ready_burger_on_billed_order(live):
+    order_id, (burger_id, _), bill_id = live.billed_order()
+    preparation_id = live.scalar(
+        "SELECT id FROM preparations WHERE order_item_id = :i", i=burger_id
+    )
+    for action in ("start", "ready"):
+        response = live.post(f"/api/v1/preparations/{preparation_id}/{action}")
+        assert response.status_code == 200, response.text
+
+    return order_id, bill_id, preparation_id
+
+
+def queue_on_order(db_engine, order_id, *requests):
+    """Requests that queue on the order's lock in the given order."""
+
+    with concurrency(db_engine) as run:
+        gate = run.gate("orders", order_id)
+        futures, waiting = [], set()
+
+        for method, path, kwargs in requests:
+            futures.append(run.start(method, path, **kwargs))
+            waiting.add(
+                run.wait_for_new_backend_blocked_by({gate.pid, *waiting}, waiting)
+            )
+
+        gate.release()
+        return results(*futures)
+
+
+def test_discard_queued_before_the_final_payment_sees_an_open_order(
+    db_engine, live
+):
+    order_id, bill_id, preparation_id = ready_burger_on_billed_order(live)
+
+    discarded, paid = queue_on_order(
+        db_engine,
+        order_id,
+        ("POST", f"/api/v1/preparations/{preparation_id}/discard",
+         {"json": {"reason": "Guest left"}, "headers": live.headers()}),
+        ("POST", f"/api/v1/bills/{bill_id}/payments",
+         {"json": {"amount": "15.00", "method": "CASH"}, "headers": live.headers()}),
+    )
+
+    assert discarded.status_code == 409
+    assert discarded.json()["error"]["code"] == "ORDER_NOT_CLOSED"
+    assert paid.status_code == 201, paid.text
+    assert live.scalar("SELECT status FROM orders WHERE id = :o", o=order_id) == "CLOSED"
+    assert live.scalar(
+        "SELECT status FROM preparations WHERE id = :p", p=preparation_id
+    ) == "READY"
+    assert live.events("preparation.discarded") == 0
+
+
+def test_discard_queued_after_the_final_payment_sees_it_committed(db_engine, live):
+    order_id, bill_id, preparation_id = ready_burger_on_billed_order(live)
+
+    paid, discarded = queue_on_order(
+        db_engine,
+        order_id,
+        ("POST", f"/api/v1/bills/{bill_id}/payments",
+         {"json": {"amount": "15.00", "method": "CASH"}, "headers": live.headers()}),
+        ("POST", f"/api/v1/preparations/{preparation_id}/discard",
+         {"json": {"reason": "Guest left"}, "headers": live.headers()}),
+    )
+
+    assert paid.status_code == 201, paid.text
+    assert discarded.status_code == 200, discarded.text
+    assert live.scalar(
+        "SELECT status FROM preparations WHERE id = :p", p=preparation_id
+    ) == "CANCELLED"
+
+
+def test_serve_queued_after_a_discard_cannot_revive_the_preparation(
+    db_engine, live
+):
+    order_id, bill_id, preparation_id = ready_burger_on_billed_order(live)
+    paid = live.post(
+        f"/api/v1/bills/{bill_id}/payments",
+        json={"amount": "15.00", "method": "CASH"},
+    )
+    assert paid.status_code == 201, paid.text
+
+    discarded, served = queue_on_order(
+        db_engine,
+        order_id,
+        ("POST", f"/api/v1/preparations/{preparation_id}/discard",
+         {"json": {"reason": "Guest left"}, "headers": live.headers()}),
+        ("POST", f"/api/v1/preparations/{preparation_id}/serve",
+         {"headers": live.headers()}),
+    )
+
+    assert discarded.status_code == 200, discarded.text
+    assert served.status_code == 409
+    assert served.json()["error"]["code"] == "INVALID_PREPARATION_TRANSITION"
+    assert live.scalar(
+        "SELECT status FROM preparations WHERE id = :p", p=preparation_id
+    ) == "CANCELLED"
+    assert live.events("preparation.served") == 0
+    changes = live.outbox("preparation.status_changed")
+    assert [
+        (event["schema_version"], event["payload"]["previous_status"], event["payload"]["status"])
+        for event in changes
+    ][-1] == (2, "READY", "CANCELLED")

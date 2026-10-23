@@ -28,6 +28,7 @@ from app.schemas.kitchen import PreparationQueueItem, PreparationQueueModifier
 from app.schemas.outbox import (
     OrderSentV1,
     PreparationStatusChangedV1,
+    preparation_status_changed,
     SentOrderItem,
 )
 from app.services.event_service import EventService
@@ -1161,19 +1162,18 @@ class OrderService:
         return order
 
     @staticmethod
-    def update_preparation_status(
+    def _lock_preparation(
         db: Session,
         restaurant_id: uuid.UUID,
-        user_id: uuid.UUID,
         preparation_id: uuid.UUID,
-        new_status: str,
         *,
         station_scope: frozenset[uuid.UUID] | None,
-    ) -> Preparation:
-        """Move a preparation to `new_status`.
+    ) -> tuple[Order, Preparation]:
+        """The restaurant's preparation and its order, with the order row
+        locked and the preparation re-read under the lock.
 
-        `station_scope` is the set of stations the user may work, or None
-        for all; required, so a caller cannot forget it.
+        Raises 404 PREPARATION_NOT_FOUND (also for another restaurant's) or
+        403 STATION_ACCESS_DENIED.
         """
 
         found = (
@@ -1220,6 +1220,31 @@ class OrderService:
             .filter(Preparation.id == preparation_id)
             .populate_existing()
             .one()
+        )
+
+        return order, preparation
+
+    @staticmethod
+    def update_preparation_status(
+        db: Session,
+        restaurant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        preparation_id: uuid.UUID,
+        new_status: str,
+        *,
+        station_scope: frozenset[uuid.UUID] | None,
+    ) -> Preparation:
+        """Move a preparation to `new_status`.
+
+        `station_scope` is the set of stations the user may work, or None
+        for all; required, so a caller cannot forget it.
+        """
+
+        order, preparation = OrderService._lock_preparation(
+            db,
+            restaurant_id,
+            preparation_id,
+            station_scope=station_scope,
         )
 
         current_status = preparation.status
@@ -1307,6 +1332,94 @@ class OrderService:
                 station_id=preparation.station_id,
                 previous_status=current_status,
                 status=new_status,
+            ),
+        )
+
+        commit(db)
+        db.refresh(preparation)
+
+        return preparation
+
+    @staticmethod
+    def discard_preparation(
+        db: Session,
+        restaurant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        preparation_id: uuid.UUID,
+        reason: str,
+        *,
+        station_scope: frozenset[uuid.UUID] | None,
+    ) -> Preparation:
+        """Cancel an unfinished preparation of a fully paid order.
+
+        Payment is not service: a CLOSED order's preparations stay in the
+        queue until served, or until discarded here (e.g. the guest left).
+        Only the preparation changes; its order item and the paid bill are
+        left as they are (no refunds). The reason goes to the audit trail.
+        """
+
+        order, preparation = OrderService._lock_preparation(
+            db,
+            restaurant_id,
+            preparation_id,
+            station_scope=station_scope,
+        )
+
+        # Read under the order lock: only the final payment closes an
+        # order, so a discard cannot overtake a payment in progress.
+        if order.status != "CLOSED":
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.ORDER_NOT_CLOSED,
+                message=(
+                    "Only preparations of a fully paid, closed order can "
+                    "be discarded"
+                ),
+            )
+
+        previous_status = preparation.status
+
+        if previous_status not in ("PENDING", "IN_PROGRESS", "READY"):
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.INVALID_PREPARATION_TRANSITION,
+                message=(
+                    f"Invalid preparation transition: "
+                    f"{previous_status} -> CANCELLED"
+                ),
+            )
+
+        preparation.status = "CANCELLED"
+        preparation.cancelled_at = datetime.utcnow()
+
+        EventService.record(
+            db=db,
+            restaurant_id=restaurant_id,
+            event_type="preparation.discarded",
+            entity_type="preparation",
+            entity_id=preparation.id,
+            user_id=user_id,
+            metadata={
+                "status": "CANCELLED",
+                "previous_status": previous_status,
+                "reason": reason,
+                "order_item_id": str(preparation.order_item_id),
+                "order_id": str(order.id),
+                "station_id": str(preparation.station_id),
+                "order_created_by": str(order.user_id),
+            },
+        )
+
+        OutboxService.record(
+            db=db,
+            restaurant_id=restaurant_id,
+            payload=preparation_status_changed(
+                preparation_id=preparation.id,
+                order_id=order.id,
+                order_item_id=preparation.order_item_id,
+                station_id=preparation.station_id,
+                previous_status=previous_status,
+                status="CANCELLED",
             ),
         )
 
