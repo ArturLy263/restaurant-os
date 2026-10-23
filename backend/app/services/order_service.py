@@ -563,11 +563,33 @@ class OrderService:
                     message=f"Product is not active: {product.id}",
                 )
 
-            if not product.station_id:
+            # Another restaurant's station counts as none, so its
+            # existence is not revealed.
+            station = (
+                db.query(Station)
+                .filter(
+                    Station.id == product.station_id,
+                    Station.restaurant_id == restaurant_id,
+                )
+                .first()
+                if product.station_id
+                else None
+            )
+
+            if station is None:
                 raise ApiError(
                     status_code=status.HTTP_409_CONFLICT,
                     code=ErrorCode.PRODUCT_HAS_NO_STATION,
                     message=f"Product {product.id} has no station",
+                )
+
+            # Checked when sending, not when adding: the station may be
+            # reactivated in between.
+            if not station.is_active:
+                raise ApiError(
+                    status_code=status.HTTP_409_CONFLICT,
+                    code=ErrorCode.STATION_INACTIVE,
+                    message=f"Station {station.name} is inactive",
                 )
 
             item.status = "SENT"
@@ -575,7 +597,7 @@ class OrderService:
 
             preparation = Preparation(
                 order_item_id=item.id,
-                station_id=product.station_id,
+                station_id=station.id,
                 status="PENDING",
             )
 

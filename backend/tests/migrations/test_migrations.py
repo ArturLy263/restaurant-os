@@ -22,7 +22,9 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
+import pytest
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import IntegrityError
 
 from app.db import models  # noqa: F401 - registers every model
 from app.db.database import Base
@@ -47,7 +49,8 @@ def current_revision(database):
 
 
 def schema_snapshot(database):
-    """Tables, columns, keys, indexes and enum types in the public schema."""
+    """Tables, columns, keys, indexes, triggers, functions and enum types
+    in the public schema."""
 
     with database.begin() as connection:
         inspector = inspect(connection)
@@ -73,6 +76,28 @@ def schema_snapshot(database):
                     for ix in inspector.get_indexes(table)
                 ),
             }
+
+        # Raw-SQL objects the inspector does not see (e.g. the tenant
+        # consistency triggers of e1b7d3a9c4f2).
+        snapshot["<triggers>"] = sorted(
+            connection.execute(
+                text(
+                    "SELECT c.relname, t.tgname FROM pg_trigger t "
+                    "JOIN pg_class c ON c.oid = t.tgrelid "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = 'public' AND NOT t.tgisinternal"
+                )
+            ).all()
+        )
+        snapshot["<functions>"] = sorted(
+            connection.scalars(
+                text(
+                    "SELECT p.proname FROM pg_proc p "
+                    "JOIN pg_namespace n ON n.oid = p.pronamespace "
+                    "WHERE n.nspname = 'public'"
+                )
+            )
+        )
 
         snapshot["<enum types>"] = sorted(
             connection.scalars(
@@ -282,3 +307,136 @@ def test_outbox_dead_letter_migration_keeps_existing_events(migration_database):
         assert connection.execute(
             text(f"SELECT {columns} FROM outbox_events ORDER BY id")
         ).all() == before
+
+
+def test_tenant_consistency_triggers_keep_and_report_existing_rows(
+    migration_database,
+):
+    """e1b7d3a9c4f2 installs the tenant consistency triggers without
+    changing existing rows that violate them, reports those rows, rejects
+    new violations, and its downgrade removes only the triggers."""
+
+    import logging
+    from decimal import Decimal
+
+    from sqlalchemy.orm import Session
+
+    from app.db.models.order import OrderItem
+    from app.db.models.preparation import Preparation
+    from app.db.models.product import Product
+    from tests.factories import create_order, create_restaurant
+
+    migrate(migration_database, command.upgrade, "c5e8a2d4f6b1")
+
+    with migration_database.begin() as connection:
+        db = Session(bind=connection)
+        own = create_restaurant(db, name="Own")
+        other = create_restaurant(db, name="Other")
+
+        misrouted = Product(
+            category_id=own.category.id,
+            name="Misrouted",
+            price=Decimal("1.00"),
+            station_id=other.station.id,
+        )
+        order = create_order(db, own, status="SENT")
+        db.add(misrouted)
+        db.flush()
+        item = OrderItem(
+            order_id=order.id,
+            product_id=other.product.id,
+            quantity=1,
+            unit_price=Decimal("12.50"),
+            total_price=Decimal("12.50"),
+            status="SENT",
+        )
+        db.add(item)
+        db.flush()
+        preparation = Preparation(
+            order_item_id=item.id,
+            station_id=other.station.id,
+            status="PENDING",
+        )
+        db.add(preparation)
+        db.flush()
+        ids = {
+            "ck_products_station_restaurant": [misrouted.id],
+            "ck_order_items_product_restaurant": [item.id],
+            "ck_preparations_station_restaurant": [preparation.id],
+        }
+        restaurants = (own, other)
+        db.close()
+
+    tables = ("products", "order_items", "preparations")
+
+    def rows():
+        with migration_database.begin() as connection:
+            return {
+                table: connection.execute(
+                    text(f"SELECT * FROM {table} ORDER BY id")
+                ).all()
+                for table in tables
+            }
+
+    before = rows()
+
+    # env.py's fileConfig removes handlers from alembic's loggers, so the
+    # report is captured on the logger object itself.
+    reports = []
+    logger = logging.getLogger("alembic.tenant_consistency")
+    logger.warning = lambda message, *args: reports.append(message % args)
+    try:
+        migrate(migration_database, command.upgrade, "e1b7d3a9c4f2")
+    finally:
+        del logger.warning
+
+    assert rows() == before
+    reported = "\n".join(reports)
+    for constraint, row_ids in ids.items():
+        assert constraint in reported
+        assert all(str(row_id) in reported for row_id in row_ids)
+
+    module = SCRIPT.get_revision("e1b7d3a9c4f2").module
+    with migration_database.begin() as connection:
+        assert module.historical_violations(connection) == ids
+
+    own, other = restaurants
+    with migration_database.begin() as connection:
+        # Unrelated updates of the existing rows keep working.
+        connection.execute(
+            text("UPDATE preparations SET status = 'CANCELLED' WHERE id = :id"),
+            {"id": ids["ck_preparations_station_restaurant"][0]},
+        )
+        connection.execute(
+            text("UPDATE order_items SET status = 'CANCELLED' WHERE id = :id"),
+            {"id": ids["ck_order_items_product_restaurant"][0]},
+        )
+        connection.execute(
+            text("UPDATE products SET name = 'Renamed' WHERE id = :id"),
+            {"id": ids["ck_products_station_restaurant"][0]},
+        )
+
+    # New violations are rejected.
+    with pytest.raises(IntegrityError) as error:
+        with migration_database.begin() as connection:
+            connection.execute(
+                text("UPDATE products SET station_id = :s WHERE id = :p"),
+                {"s": other.station.id, "p": own.product.id},
+            )
+
+    assert error.value.orig.diag.constraint_name == "ck_products_station_restaurant"
+
+    migrate(migration_database, command.downgrade, "c5e8a2d4f6b1")
+
+    with migration_database.begin() as connection:
+        assert connection.scalar(
+            text(
+                "SELECT count(*) FROM pg_trigger "
+                "WHERE tgname LIKE 'trg_%_restaurant'"
+            )
+        ) == 0
+        # Without the triggers the same update is accepted again.
+        connection.execute(
+            text("UPDATE products SET station_id = :s WHERE id = :p"),
+            {"s": other.station.id, "p": own.product.id},
+        )
