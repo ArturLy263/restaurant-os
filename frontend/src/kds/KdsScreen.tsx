@@ -1,21 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import { isApiError, type ApiError } from "../api/client";
-import { getStationQueue, getStations, updatePreparation } from "../api/endpoints";
+import { isApiError } from "../api/client";
+import { getStations, updatePreparation } from "../api/endpoints";
 import type { CurrentUser, PreparationQueueItem, Station } from "../api/types";
-import { useAuth } from "../auth/AuthContext";
+import { SESSION_EXPIRED_NOTICE, useAuth } from "../auth/AuthContext";
 import { QueueBoard } from "./QueueBoard";
 import { StationPicker } from "./StationPicker";
 import { nextAction } from "./queue";
+import { useStationLiveQueue, type Load, type LiveStatus } from "./stationLive";
 
 const STATION_KEY = "restaurantos.stationId";
 // How often elapsed times are recomputed (not a refetch).
 const CLOCK_INTERVAL_MS = 30_000;
-
-type Load<T> =
-  | { status: "loading" }
-  | { status: "loaded"; data: T }
-  | { status: "error"; error: ApiError | Error };
 
 interface Notice {
   kind: "info" | "error";
@@ -115,42 +111,28 @@ interface StationQueueProps {
 }
 
 function StationQueue({ token, station, permissions, onLeave }: StationQueueProps) {
-  const { handleAuthError } = useAuth();
-  const [queue, setQueue] = useState<Load<PreparationQueueItem[]>>({ status: "loading" });
-  const [refreshing, setRefreshing] = useState(false);
+  const { handleAuthError, logout } = useAuth();
   const [pendingIds, setPendingIds] = useState<ReadonlySet<string>>(new Set());
   const [notice, setNotice] = useState<Notice | null>(null);
   const [now, setNow] = useState(() => new Date());
   const permissionSet = useMemo(() => new Set(permissions), [permissions]);
-  const latestLoad = useRef(0);
 
-  const loadQueue = useCallback(async () => {
-    const attempt = ++latestLoad.current;
-    setRefreshing(true);
-    try {
-      const data = await getStationQueue(token, station.id);
-      if (attempt !== latestLoad.current) return;
-      setQueue({ status: "loaded", data });
-      setNow(new Date());
-    } catch (error) {
-      if (attempt !== latestLoad.current || handleAuthError(error)) return;
-      // Keep showing the last queue if there is one; say it is stale.
-      setQueue((current) =>
-        current.status === "loaded" ? current : { status: "error", error: error as Error },
-      );
+  const { snapshot, reload } = useStationLiveQueue({
+    stationId: station.id,
+    token,
+    onLoadError: (error) => {
+      if (handleAuthError(error)) return;
+      // The last queue stays on screen; say it is stale.
       setNotice({ kind: "error", text: `Queue could not be refreshed: ${messageOf(error)}` });
-    } finally {
-      if (attempt === latestLoad.current) setRefreshing(false);
-    }
-  }, [token, station.id, handleAuthError]);
+    },
+    onAuthExpired: () => logout(SESSION_EXPIRED_NOTICE),
+  });
+  const { queue, refreshing, live } = snapshot;
 
+  // Elapsed times restart from a fresh clock whenever the queue changes.
   useEffect(() => {
-    void loadQueue();
-    return () => {
-      // Results of a request for an unmounted station are ignored.
-      latestLoad.current++;
-    };
-  }, [loadQueue]);
+    setNow(new Date());
+  }, [queue]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), CLOCK_INTERVAL_MS);
@@ -175,7 +157,7 @@ function StationQueue({ token, station, permissions, onLeave }: StationQueueProp
     }
     // Refetch after success and after a failure, which usually means the
     // item changed elsewhere (409) or left this station's queue (404).
-    await loadQueue();
+    await reload();
   }
 
   if (queue.status === "loading") {
@@ -188,7 +170,7 @@ function StationQueue({ token, station, permissions, onLeave }: StationQueueProp
       <ErrorState
         title={forbidden ? `No access to ${station.name}` : "Queue could not be loaded"}
         error={queue.error}
-        onRetry={forbidden ? undefined : () => void loadQueue()}
+        onRetry={forbidden ? undefined : () => void reload()}
         secondary={{ label: "Choose another station", onClick: onLeave }}
       />
     );
@@ -204,10 +186,11 @@ function StationQueue({ token, station, permissions, onLeave }: StationQueueProp
         <span className="queue__summary">
           {queue.data.length} open {queue.data.length === 1 ? "item" : "items"}
         </span>
+        <LiveIndicator status={live.status} reason={live.reason} />
         <button
           type="button"
           className="button button--secondary"
-          onClick={() => void loadQueue()}
+          onClick={() => void reload()}
           disabled={refreshing}
         >
           {refreshing ? "Refreshing…" : "Refresh"}
@@ -258,6 +241,31 @@ function actionErrorMessage(error: unknown, label: string, item: PreparationQueu
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error";
+}
+
+const LIVE_LABELS: Record<LiveStatus, string> = {
+  connecting: "Connecting…",
+  live: "Live",
+  reconnecting: "Reconnecting…",
+  offline: "Live updates off",
+};
+
+const LIVE_HINTS: Record<LiveStatus, string> = {
+  connecting: "Connecting to live updates; use Refresh meanwhile.",
+  live: "The queue updates as orders change.",
+  reconnecting: "Live updates were interrupted; reconnecting. Use Refresh meanwhile.",
+  offline: "Live updates are off; use Refresh.",
+};
+
+function LiveIndicator({ status, reason }: { status: LiveStatus; reason: string | null }) {
+  const hint = reason ? `${reason} ${LIVE_HINTS[status]}` : LIVE_HINTS[status];
+  return (
+    <span className={`live live--${status}`} role="status" title={hint}>
+      <span className="live__dot" aria-hidden="true" />
+      {LIVE_LABELS[status]}
+      <span className="visually-hidden">. {hint}</span>
+    </span>
+  );
 }
 
 function LoadingState({ text }: { text: string }) {
