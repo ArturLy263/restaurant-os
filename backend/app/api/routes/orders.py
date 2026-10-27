@@ -60,6 +60,7 @@ def create_order(
     "/{order_id}/items",
     response_model=OrderItemResponse,
     status_code=201,
+    responses=IDEMPOTENT_ROUTE_RESPONSES,
 )
 def add_order_item(
     order_id: uuid.UUID,
@@ -69,21 +70,24 @@ def add_order_item(
         require_permission(Permission.ORDERS_ADD_ITEMS)
     ),
     auth: AuthContext = Depends(get_auth_context),
+    idempotency: Idempotency = Depends(),
 ):
-    order_item = OrderService.add_order_item(
-        db=db,
-        restaurant_id=current_user.restaurant_id,
-        user_id=current_user.id,
-        order_id=order_id,
-        product_id=request.product_id,
-        quantity=request.quantity,
-        modifier_ids=request.modifier_ids,
-        can_modify_any_order=(
-            Permission.ORDERS_MANAGE_ALL in auth.permissions
+    # Without a key a retry adds the item again; with one it replays.
+    return idempotency.run(
+        lambda: OrderService.add_order_item(
+            db=db,
+            restaurant_id=current_user.restaurant_id,
+            user_id=current_user.id,
+            order_id=order_id,
+            product_id=request.product_id,
+            quantity=request.quantity,
+            modifier_ids=request.modifier_ids,
+            can_modify_any_order=(
+                Permission.ORDERS_MANAGE_ALL in auth.permissions
+            ),
         ),
+        payload=request,
     )
-
-    return order_item
 
 @router.post(
     "/{order_id}/send",

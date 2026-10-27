@@ -14,6 +14,7 @@ from app.api.idempotency import IDEMPOTENCY_KEY_HEADER, REPLAYED_HEADER
 from app.db.models.bill import Payment
 from app.db.models.idempotency_key import IdempotencyKey
 from app.db.models.order import Order
+from app.db.models.outbox_event import OutboxEvent
 from app.db.models.user import User
 from app.core.security import hash_password
 from tests.factories import auth_headers, create_restaurant
@@ -410,3 +411,103 @@ def test_create_order_retry_without_key_conflicts(pos):
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "TABLE_NOT_AVAILABLE"
     assert response.json()["detail"] == "Table is not available"
+
+
+# --- Adding items, billing and preparation steps ---
+
+
+def item_count(pos, order_id):
+    return len(pos.items(order_id))
+
+
+def test_add_item_retry_adds_the_item_once(pos):
+    order_id = pos.create_order().json()["id"]
+    body = {"product_id": str(pos.burger.id), "quantity": 2}
+
+    first = post(pos, f"/api/v1/orders/{order_id}/items", "add-1", json=body)
+    again = post(pos, f"/api/v1/orders/{order_id}/items", "add-1", json=body)
+
+    assert first.status_code == 201
+    assert_replay(first, again)
+    assert again.headers[REPLAYED_HEADER] == "true"
+    assert item_count(pos, order_id) == 1
+
+
+def test_add_item_without_a_key_adds_again(pos):
+    """The reason to send a key: a plain retry orders the dish twice."""
+
+    order_id = pos.create_order().json()["id"]
+
+    assert pos.add_item(order_id, pos.burger).status_code == 201
+    assert pos.add_item(order_id, pos.burger).status_code == 201
+    assert item_count(pos, order_id) == 2
+
+
+def test_add_item_with_a_reused_key_and_another_item_is_rejected(pos):
+    order_id = pos.create_order().json()["id"]
+    burger = {"product_id": str(pos.burger.id), "quantity": 1}
+    coke = {"product_id": str(pos.coke.id), "quantity": 1}
+
+    assert post(pos, f"/api/v1/orders/{order_id}/items", "add-1", json=burger).status_code == 201
+    response = post(pos, f"/api/v1/orders/{order_id}/items", "add-1", json=coke)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "IDEMPOTENCY_KEY_REUSED"
+    assert item_count(pos, order_id) == 1
+
+
+def test_create_bill_retry_replays_the_bill(pos):
+    order_id, *_ = pos.sent_order()
+
+    first = post(pos, f"/api/v1/bills/order/{order_id}", "bill-1")
+    again = post(pos, f"/api/v1/bills/order/{order_id}", "bill-1")
+
+    assert first.status_code == 201
+    assert_replay(first, again)
+    assert again.headers[REPLAYED_HEADER] == "true"
+
+
+@pytest.mark.parametrize(
+    ("steps", "event"),
+    [
+        (["start"], "preparation.started"),
+        (["start", "ready"], "preparation.ready"),
+        (["start", "ready", "serve"], "preparation.served"),
+    ],
+)
+def test_preparation_step_retry_replays_instead_of_conflicting(pos, steps, event):
+    order_id, burger_id, _ = pos.sent_order()
+    preparation_id = pos.preparation(burger_id).id
+    *earlier, last = steps
+    for step in earlier:
+        assert post(pos, f"/api/v1/preparations/{preparation_id}/{step}", f"{step}-1").status_code == 200
+
+    first = post(pos, f"/api/v1/preparations/{preparation_id}/{last}", f"{last}-1")
+    again = post(pos, f"/api/v1/preparations/{preparation_id}/{last}", f"{last}-1")
+
+    assert first.status_code == 200
+    assert_replay(first, again)
+    assert again.headers[REPLAYED_HEADER] == "true"
+    assert len(pos.events(event)) == 1
+    # One outbox event per step taken, none for the replay.
+    changes = (
+        pos._fresh()
+        .query(OutboxEvent)
+        .filter(
+            OutboxEvent.restaurant_id == pos.restaurant.restaurant.id,
+            OutboxEvent.event_type == "preparation.status_changed",
+        )
+        .count()
+    )
+    assert changes == len(steps)
+
+
+def test_preparation_step_retry_without_a_key_conflicts(pos):
+    order_id, burger_id, _ = pos.sent_order()
+    preparation_id = pos.preparation(burger_id).id
+
+    assert pos.client.post(f"/api/v1/preparations/{preparation_id}/start", headers=pos.headers).status_code == 200
+    again = pos.client.post(f"/api/v1/preparations/{preparation_id}/start", headers=pos.headers)
+
+    assert again.status_code == 409
+    assert again.json()["error"]["code"] == "INVALID_PREPARATION_TRANSITION"

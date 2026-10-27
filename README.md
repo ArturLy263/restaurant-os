@@ -392,11 +392,14 @@ These mutations accept an `Idempotency-Key` header:
 | Operation | Endpoint |
 | --- | --- |
 | Open an order for a table | `POST /api/v1/orders` |
+| Add an item to an order | `POST /api/v1/orders/{order_id}/items` |
 | Send an order's new items | `POST /api/v1/orders/{order_id}/send` |
 | Cancel an order item (no bill yet) | `POST /api/v1/orders/{order_id}/items/{item_id}/cancel` |
 | Cancel a billed item (bill adjustment) | `POST /api/v1/bills/{bill_id}/items/{item_id}/cancel` |
 | Void (cancel) an order | `POST /api/v1/orders/{order_id}/void` |
+| Create (or fetch) the order's bill | `POST /api/v1/bills/order/{order_id}` |
 | Take a payment (closes the order when fully paid) | `POST /api/v1/bills/{bill_id}/payments` |
+| Start, finish or serve a preparation | `POST /api/v1/preparations/{preparation_id}/start\|ready\|serve` |
 | Discard a paid order's preparation | `POST /api/v1/preparations/{preparation_id}/discard` |
 
 Clients should generate a new key (e.g. a UUID) for each operation and
@@ -412,8 +415,9 @@ curl -X POST http://127.0.0.1:8000/api/v1/bills/$BILL_ID/payments \
 ```
 
 - **Without a key** the request behaves exactly as before: no
-  deduplication. A retried payment is a second payment (if the bill
-  allows it); a retried send or void gets a 409. The key is optional so
+  deduplication. A retried add-item adds the item again and a retried
+  payment is a second payment (if the bill allows it); a retried send,
+  void or preparation step gets a 409. The key is optional so
   existing clients keep working; new clients should always send it.
 - **Format:** 1-255 printable ASCII characters without spaces; otherwise
   400 `IDEMPOTENCY_KEY_INVALID`.

@@ -35,6 +35,7 @@ router = APIRouter(
     "/order/{order_id}",
     response_model=CreateBillResponse,
     status_code=status.HTTP_201_CREATED,
+    responses=IDEMPOTENT_ROUTE_RESPONSES,
 )
 def create_bill(
     order_id: uuid.UUID,
@@ -42,12 +43,15 @@ def create_bill(
     current_user: User = Depends(
         require_permission(Permission.BILLS_CREATE)
     ),
+    idempotency: Idempotency = Depends(),
 ):
-    return BillService.create_bill(
-        db=db,
-        restaurant_id=current_user.restaurant_id,
-        user_id=current_user.id,
-        order_id=order_id,
+    return idempotency.run(
+        lambda: BillService.create_bill(
+            db=db,
+            restaurant_id=current_user.restaurant_id,
+            user_id=current_user.id,
+            order_id=order_id,
+        ),
     )
 
 
