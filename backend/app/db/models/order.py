@@ -3,9 +3,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.states import ORDER, ORDER_ITEM, status_check
 from app.db.database import Base
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,13 @@ from app.db.models.modifier import OrderItemModifier
 
 class Order(Base):
     __tablename__ = "orders"
+
+    __table_args__ = (
+        CheckConstraint(
+            status_check(ORDER),
+            name="ck_orders_status",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True,
@@ -85,6 +93,13 @@ class Order(Base):
 
 class OrderItem(Base):
     __tablename__ = "order_items"
+
+    __table_args__ = (
+        CheckConstraint(
+            status_check(ORDER_ITEM),
+            name="ck_order_items_status",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True,

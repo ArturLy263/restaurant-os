@@ -1,14 +1,22 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.states import TABLE, status_check
 from app.db.database import Base
 
 
 class Table(Base):
     __tablename__ = "tables"
+
+    __table_args__ = (
+        CheckConstraint(
+            status_check(TABLE),
+            name="ck_tables_status",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True,

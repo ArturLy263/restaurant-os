@@ -8,6 +8,14 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError, ErrorCode
 from app.core.permissions import Permission
+from app.core.states import (
+    BILL,
+    ORDER,
+    ORDER_ITEM,
+    PREPARATION,
+    PREPARATION_STEPS,
+    TABLE,
+)
 from app.db.models.bill import Bill, BillAdjustment
 from app.db.models.category import Category
 from app.db.models.modifier import (
@@ -215,7 +223,7 @@ class OrderService:
             },
         )
 
-        table.status = "OCCUPIED"
+        TABLE.apply(table, "OCCUPIED")
 
         commit(db)
         db.refresh(order)
@@ -593,7 +601,7 @@ class OrderService:
                     message=f"Station {station.name} is inactive",
                 )
 
-            item.status = "SENT"
+            ORDER_ITEM.apply(item, "SENT")
             item.sent_at = datetime.utcnow()
 
             preparation = Preparation(
@@ -635,7 +643,7 @@ class OrderService:
             raise
 
         is_initial_send = order.status == "OPEN"
-        order.status = "SENT"
+        ORDER.apply(order, "SENT")
 
         EventService.record(
             db=db,
@@ -874,14 +882,14 @@ class OrderService:
         previous_item_status = item.status
 
         # Perform cancellation
-        item.status = "CANCELLED"
+        ORDER_ITEM.apply(item, "CANCELLED")
         item.cancelled_at = now
 
         cancelled_preps = []
         for prep in preparations:
             if prep.status in ("PENDING", "IN_PROGRESS"):
                 prep_previous_status = prep.status
-                prep.status = "CANCELLED"
+                PREPARATION.apply(prep, "CANCELLED")
                 prep.cancelled_at = now
                 cancelled_preps.append({
                     "preparation_id": str(prep.id),
@@ -1087,7 +1095,7 @@ class OrderService:
         previous_status = order.status
 
         if bill is not None:
-            bill.status = "VOID"
+            BILL.apply(bill, "VOID")
             bill.voided_at = now
 
             EventService.record(
@@ -1107,13 +1115,13 @@ class OrderService:
                 },
             )
 
-        order.status = "CANCELLED"
+        ORDER.apply(order, "CANCELLED")
         order.cancelled_at = now
 
         table = db.get(Table, order.table_id)
 
         if table is not None:
-            table.status = "AVAILABLE"
+            TABLE.apply(table, "AVAILABLE")
 
         EventService.record(
             db=db,
@@ -1249,13 +1257,7 @@ class OrderService:
 
         current_status = preparation.status
 
-        valid_transitions = {
-            "PENDING": "IN_PROGRESS",
-            "IN_PROGRESS": "READY",
-            "READY": "SERVED",
-        }
-
-        expected_next_status = valid_transitions.get(current_status)
+        expected_next_status = PREPARATION_STEPS.get(current_status)
 
         if expected_next_status != new_status:
             raise ApiError(
@@ -1269,7 +1271,7 @@ class OrderService:
 
         now = datetime.utcnow()
 
-        preparation.status = new_status
+        PREPARATION.apply(preparation, new_status)
 
         if new_status == "IN_PROGRESS":
             preparation.started_at = now
@@ -1379,7 +1381,7 @@ class OrderService:
 
         previous_status = preparation.status
 
-        if previous_status not in ("PENDING", "IN_PROGRESS", "READY"):
+        if not PREPARATION.allows(previous_status, "CANCELLED"):
             raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
                 code=ErrorCode.INVALID_PREPARATION_TRANSITION,
@@ -1389,7 +1391,7 @@ class OrderService:
                 ),
             )
 
-        preparation.status = "CANCELLED"
+        PREPARATION.apply(preparation, "CANCELLED")
         preparation.cancelled_at = datetime.utcnow()
 
         EventService.record(

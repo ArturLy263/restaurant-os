@@ -455,6 +455,33 @@ curl -X POST http://127.0.0.1:8000/api/v1/bills/$BILL_ID/payments \
   them. Such tables stay `OCCUPIED` and simply reject new orders until
   their orders are closed or voided.
 
+### Status rules
+
+`backend/app/core/states.py` lists every status and every allowed status
+change of orders, order items, preparations, bills and tables (payments
+and bill adjustments have one status each):
+
+| Record | Changes |
+| --- | --- |
+| order | `OPEN → SENT`, `SENT → SENT` (later rounds), `OPEN/SENT → CANCELLED` (void), `SENT → CLOSED` (final payment) |
+| order item | `ADDED → SENT`, `ADDED/SENT → CANCELLED` |
+| preparation | `PENDING → IN_PROGRESS → READY → SERVED`, `PENDING/IN_PROGRESS → CANCELLED` (item cancelled), `READY → CANCELLED` (discard) |
+| bill | `OPEN → PAID`, `OPEN → VOID` |
+| table | `AVAILABLE → OCCUPIED`, `OCCUPIED/AVAILABLE → AVAILABLE` |
+
+Each operation still checks its own business rules first and answers with
+its specific error (`ORDER_BILLED`, `INVALID_PREPARATION_TRANSITION`, ...).
+Every status write then goes through the rules, which refuse any other
+change: a missing or wrong guard fails the request with a 500 and rolls it
+back instead of storing an impossible state. The preparation changes are
+exactly those the `preparation.status_changed` contracts describe (v2; v1
+without `READY → CANCELLED`).
+
+PostgreSQL enforces each vocabulary with a CHECK constraint
+`ck_<table>_status` (migration `f4c2a8d6b1e3`). The upgrade changes no
+rows; if a table already holds another status it stops before adding any
+constraint and names the table and values, to be reviewed by hand.
+
 ### Tenant consistency
 
 Every record belongs to one restaurant, and PostgreSQL triggers (migration
@@ -933,9 +960,11 @@ REQUIRE_TEST_DATABASE=1 pytest
 - upgrading from an empty database to head and downgrading back to base
   works, leaving the schema empty,
 - every migration's downgrade exactly reverses its upgrade (tables,
-  keys, indexes, triggers and functions),
+  keys, indexes, CHECK constraints, triggers and functions),
 - the SQLAlchemy models match the migrated schema (the equivalent of
-  `alembic check`).
+  `alembic check`),
+- the status CHECK constraints allow exactly the statuses of
+  `app/core/states.py`.
 
 The model comparison uses Alembic autogenerate and has its limits: it
 compares tables, columns, types, nullability, indexes, unique constraints

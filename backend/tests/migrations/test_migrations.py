@@ -9,12 +9,14 @@ back to DATABASE_URL.
 Limitations of the models-versus-migrations comparison (Alembic
 autogenerate): it compares tables, columns, column types, nullability,
 indexes, unique constraints and foreign keys. It does not compare server
-defaults (not enabled here), CHECK constraints, triggers, functions,
+defaults (not enabled here), CHECK constraints (see
+test_status_checks_match_the_state_rules), triggers, functions,
 sequences or other objects created with raw SQL, and it cannot detect
 data migrations that are wrong. A renamed column or table shows up as a
 drop plus an add.
 """
 
+import re
 from pathlib import Path
 
 from alembic import command
@@ -49,8 +51,8 @@ def current_revision(database):
 
 
 def schema_snapshot(database):
-    """Tables, columns, keys, indexes, triggers, functions and enum types
-    in the public schema."""
+    """Tables, columns, keys, indexes, CHECK constraints, triggers,
+    functions and enum types in the public schema."""
 
     with database.begin() as connection:
         inspector = inspect(connection)
@@ -74,6 +76,10 @@ def schema_snapshot(database):
                 "indexes": sorted(
                     (ix["name"], tuple(ix["column_names"]), ix["unique"])
                     for ix in inspector.get_indexes(table)
+                ),
+                "checks": sorted(
+                    (ck["name"], ck["sqltext"])
+                    for ck in inspector.get_check_constraints(table)
                 ),
             }
 
@@ -440,3 +446,82 @@ def test_tenant_consistency_triggers_keep_and_report_existing_rows(
             text("UPDATE products SET station_id = :s WHERE id = :p"),
             {"s": other.station.id, "p": own.product.id},
         )
+
+
+STATUS_TABLES = ("orders", "order_items", "preparations", "bills", "tables", "payments", "bill_adjustments")
+
+
+def status_checks(database):
+    with database.begin() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT conrelid::regclass::text, conname, pg_get_constraintdef(oid) "
+                "FROM pg_constraint WHERE contype = 'c' AND conname LIKE 'ck_%_status'"
+            )
+        ).all()
+    return {table: (name, definition) for table, name, definition in rows}
+
+
+def test_status_checks_match_the_state_rules(migration_database):
+    """f4c2a8d6b1e3 allows exactly the statuses of app.core.states."""
+
+    from app.core.states import BY_TABLE
+
+    migrate(migration_database, command.upgrade, "head")
+    checks = status_checks(migration_database)
+
+    assert set(checks) == set(BY_TABLE) == set(STATUS_TABLES)
+    for table, machine in BY_TABLE.items():
+        name, definition = checks[table]
+        assert name == f"ck_{table}_status"
+        allowed = set(re.findall(r"'([A-Z_]+)'", definition))
+        assert allowed == machine.statuses, table
+
+    with migration_database.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO restaurants (id, name, timezone, currency, is_active, created_at, updated_at) "
+                "VALUES ('11111111-1111-4111-8111-111111111111', 'R', 'UTC', 'EUR', true, now(), now())"
+            )
+        )
+        with pytest.raises(IntegrityError, match="ck_tables_status"), connection.begin_nested():
+            connection.execute(
+                text(
+                    "INSERT INTO tables (id, restaurant_id, number, capacity, status, is_active, created_at, updated_at) "
+                    "VALUES ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111', "
+                    "1, 2, 'BROKEN', true, now(), now())"
+                )
+            )
+
+
+def test_status_check_migration_keeps_rows_and_refuses_unknown_statuses(migration_database):
+    """f4c2a8d6b1e3 changes no row; with an unknown status it stops before
+    adding any constraint, so nothing is half applied."""
+
+    migrate(migration_database, command.upgrade, "e1b7d3a9c4f2")
+    with migration_database.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO restaurants (id, name, timezone, currency, is_active, created_at, updated_at) "
+                "VALUES ('11111111-1111-4111-8111-111111111111', 'R', 'UTC', 'EUR', true, now(), now())"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO tables (id, restaurant_id, number, capacity, status, is_active, created_at, updated_at) "
+                "VALUES ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111', "
+                "1, 2, 'RESERVED', true, now(), now())"
+            )
+        )
+
+    with pytest.raises(RuntimeError, match=r"tables.*RESERVED"):
+        migrate(migration_database, command.upgrade, "f4c2a8d6b1e3")
+    assert current_revision(migration_database) == "e1b7d3a9c4f2"
+    assert status_checks(migration_database) == {}
+
+    with migration_database.begin() as connection:
+        connection.execute(text("UPDATE tables SET status = 'AVAILABLE'"))
+    migrate(migration_database, command.upgrade, "f4c2a8d6b1e3")
+    with migration_database.begin() as connection:
+        assert connection.scalar(text("SELECT status FROM tables")) == "AVAILABLE"
+    assert set(status_checks(migration_database)) == set(STATUS_TABLES)
