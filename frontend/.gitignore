@@ -1,0 +1,5 @@
+node_modules/
+dist/
+*.tsbuildinfo
+# Local Vite env files may hold machine-specific values.
+*.local
