@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { App } from "../App";
 import { writeToken } from "../auth/tokenStorage";
@@ -36,7 +36,7 @@ async function goLive(socket: FakeWebSocket, stationId = STATION.id) {
 }
 
 describe("KDS live updates", () => {
-  it("shows connecting, then live, and applies stream events without any action request", async () => {
+  it("shows connecting, connected, then live once events arrive, without any action request", async () => {
     const pasta = queueItem({ product_name: "Pasta" });
     const { socket, calls } = await openKitchen([pasta]);
 
@@ -44,13 +44,15 @@ describe("KDS live updates", () => {
     expect(liveStatus()).toContain("Connecting…");
 
     await goLive(socket);
-    expect(liveStatus()).toContain("Live");
+    expect(liveStatus()).toContain("Connected");
+    expect(liveStatus()).toContain("delivery is not confirmed");
     expect(JSON.parse(socket.sent[0])).toEqual({ type: "authenticate", token: TOKEN });
     // The queue is reloaded once subscribed.
     expect(await screen.findByRole("button", { name: "Refresh" })).toBeTruthy();
     expect(calls.filter((call) => call.key === QUEUE)).toHaveLength(2);
 
     act(() => socket.receive(statusChanged("e1", pasta, "PENDING", "IN_PROGRESS")));
+    expect(liveStatus()).toMatch(/^Live\./);
     const preparing = screen.getByRole("region", { name: "Preparing" });
     expect(within(preparing).getByRole("button", { name: "Ready: 1× Pasta" })).toBeTruthy();
 
@@ -82,6 +84,48 @@ describe("KDS live updates", () => {
     act(() => socket.serverClose(1006));
     expect(liveStatus()).toContain("Reconnecting…");
     expect(screen.getByText("Pasta")).toBeTruthy();
+  });
+
+  it("reconnects at once when the network returns or the display becomes visible", async () => {
+    const { socket } = await openKitchen();
+    await goLive(socket);
+    // Past the minimum gap between connection attempts.
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 10_000);
+
+    act(() => socket.serverClose(1006));
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 20_000);
+    act(() => FakeWebSocket.latest().serverClose(1006));
+    const visibility = vi.spyOn(document, "visibilityState", "get");
+    visibility.mockReturnValue("hidden");
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    visibility.mockReturnValue("visible");
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(FakeWebSocket.instances).toHaveLength(3);
+    expect(liveStatus()).toContain("Reconnecting…");
+  });
+
+  it("stops listening for network and visibility changes when the queue closes", async () => {
+    const { socket } = await openKitchen();
+    await goLive(socket);
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 10_000);
+    act(() => socket.serverClose(1006));
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
   it("stops live updates for a forbidden station but keeps manual refresh", async () => {

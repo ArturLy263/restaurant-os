@@ -245,6 +245,7 @@ function messageOf(error: unknown): string {
 
 const LIVE_LABELS: Record<LiveStatus, string> = {
   connecting: "Connecting…",
+  connected: "Connected",
   live: "Live",
   reconnecting: "Reconnecting…",
   offline: "Live updates off",
@@ -252,7 +253,10 @@ const LIVE_LABELS: Record<LiveStatus, string> = {
 
 const LIVE_HINTS: Record<LiveStatus, string> = {
   connecting: "Connecting to live updates; use Refresh meanwhile.",
-  live: "The queue updates as orders change.",
+  connected:
+    "Connected to the station's live updates, but none has arrived on this connection yet, " +
+    "so delivery is not confirmed. If the queue does not change as orders do, use Refresh.",
+  live: "Receiving live updates; the queue changes as orders do.",
   reconnecting: "Live updates were interrupted; reconnecting. Use Refresh meanwhile.",
   offline: "Live updates are off; use Refresh.",
 };

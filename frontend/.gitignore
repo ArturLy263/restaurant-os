@@ -3,3 +3,5 @@ dist/
 *.tsbuildinfo
 # Local Vite env files may hold machine-specific values.
 *.local
+# Browser test screenshots.
+e2e/artifacts/

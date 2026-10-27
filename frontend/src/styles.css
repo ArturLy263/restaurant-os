@@ -427,6 +427,10 @@ button {
   --live-color: var(--ready);
 }
 
+.live--connected {
+  --live-color: var(--pending);
+}
+
 .live--connecting,
 .live--reconnecting {
   --live-color: var(--warning);

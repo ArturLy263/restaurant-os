@@ -90,7 +90,27 @@ describe("StationLiveQueue protocol", () => {
     expect(live.getSnapshot().live.status).toBe("connecting");
 
     socket.subscribe(STATION.id);
-    expect(live.getSnapshot().live).toEqual({ status: "live", reason: null });
+    expect(live.getSnapshot().live).toEqual({ status: "connected", reason: null });
+  });
+
+  it("reports live only once the server delivered something on this connection", async () => {
+    const item = queueItem();
+    const { live, socket } = await liveWith([item]);
+    expect(live.getSnapshot().live.status).toBe("connected");
+
+    // Even an event that changes nothing proves delivery.
+    socket.receive(statusChanged("e1", queueItem(), "PENDING", "IN_PROGRESS"));
+    expect(live.getSnapshot().live.status).toBe("live");
+
+    // A new connection has to prove it again.
+    socket.serverClose(1012);
+    vi.advanceTimersByTime(1_000);
+    const next = FakeWebSocket.latest();
+    next.accept();
+    next.subscribe(STATION.id);
+    expect(live.getSnapshot().live.status).toBe("connected");
+    next.receive(resyncRequired());
+    expect(live.getSnapshot().live.status).toBe("live");
   });
 
   it("reloads the queue after subscribed, even when the first load is still running", async () => {
@@ -278,7 +298,7 @@ describe("StationLiveQueue reconnection", () => {
     const current = FakeWebSocket.latest();
     current.accept();
     current.subscribe(STATION.id);
-    expect(live.getSnapshot().live.status).toBe("live");
+    expect(live.getSnapshot().live.status).toBe("connected");
     expect(fetchQueue).toHaveBeenCalledTimes(3);
     loads[2].resolve([]);
     await settle();
@@ -324,6 +344,102 @@ describe("StationLiveQueue reconnection", () => {
     expect(items(live.getSnapshot())).toEqual([item]);
     expect(onAuthExpired).not.toHaveBeenCalled();
     vi.advanceTimersByTime(RECONNECT_MAX_MS * 4);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+});
+
+describe("StationLiveQueue wake", () => {
+  it("reconnects at once when woken during a backoff, without a second socket", async () => {
+    const { live, socket } = await liveWith([]);
+    socket.serverClose(1006);
+    // Three failed attempts: the next one would wait 8 s.
+    for (const delay of [1_000, 2_000, 4_000]) {
+      vi.advanceTimersByTime(delay);
+      FakeWebSocket.latest().serverClose(1006);
+    }
+    expect(FakeWebSocket.instances).toHaveLength(4);
+
+    vi.advanceTimersByTime(1_000);
+    live.wake();
+    live.wake();
+    expect(FakeWebSocket.instances).toHaveLength(5);
+    // The pending backoff timer is gone: no extra socket later.
+    vi.advanceTimersByTime(8_000);
+    expect(FakeWebSocket.instances).toHaveLength(5);
+
+    // A failure after a wake keeps backing off from where it was.
+    FakeWebSocket.latest().serverClose(1006);
+    vi.advanceTimersByTime(15_999);
+    expect(FakeWebSocket.instances).toHaveLength(5);
+    vi.advanceTimersByTime(1);
+    expect(FakeWebSocket.instances).toHaveLength(6);
+  });
+
+  it("reconnects no sooner than the base delay after the last attempt when woken early", async () => {
+    const { live, socket } = await liveWith([]);
+    vi.advanceTimersByTime(5_000);
+    socket.serverClose(1006);
+    live.wake();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    // Fails at once; the backoff would now wait 2 s.
+    FakeWebSocket.latest().serverClose(1006);
+    vi.advanceTimersByTime(500);
+    live.wake();
+    live.wake();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    // Brought forward to 1 s after the last attempt, not 2 s.
+    vi.advanceTimersByTime(499);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    vi.advanceTimersByTime(1);
+    expect(FakeWebSocket.instances).toHaveLength(3);
+    vi.advanceTimersByTime(10_000);
+    expect(FakeWebSocket.instances).toHaveLength(3);
+  });
+
+  it("keeps a pending reconnect that is due sooner than a wake could bring it", async () => {
+    const { live, socket } = await liveWith([]);
+    socket.serverClose(1006);
+    // Due 1 s after the close; a wake now cannot make it earlier.
+    vi.advanceTimersByTime(200);
+    live.wake();
+    vi.advanceTimersByTime(799);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it("reloads a subscribed queue once, and not while a load runs", async () => {
+    const { live, loads, fetchQueue } = await liveWith([]);
+    live.wake();
+    live.wake();
+    expect(fetchQueue).toHaveBeenCalledTimes(3);
+    loads[2].resolve([]);
+    await settle();
+    expect(fetchQueue).toHaveBeenCalledTimes(3);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it("leaves refused, connecting, unstarted and stopped streams alone", async () => {
+    const refused = await liveWith([]);
+    refused.socket.serverClose(4403, "STATION_ACCESS_DENIED");
+    refused.live.wake();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(refused.fetchQueue).toHaveBeenCalledTimes(2);
+
+    FakeWebSocket.reset();
+    const connecting = setup();
+    connecting.live.wake();
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    connecting.live.start();
+    vi.advanceTimersByTime(5_000);
+    connecting.live.wake();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(connecting.fetchQueue).toHaveBeenCalledTimes(1);
+
+    connecting.live.stop();
+    FakeWebSocket.latest().serverClose(1006);
+    connecting.live.wake();
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 });

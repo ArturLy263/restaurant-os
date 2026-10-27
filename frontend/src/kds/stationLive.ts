@@ -16,7 +16,10 @@ export type Load<T> =
   | { status: "loaded"; data: T }
   | { status: "error"; error: Error };
 
-export type LiveStatus = "connecting" | "live" | "reconnecting" | "offline";
+// connected: subscribed, but nothing delivered on this connection yet. The
+// protocol cannot tell an idle station from an API that delivers no events
+// (OUTBOX_WEBSOCKET_DELIVERY off), so only a delivered message makes it live.
+export type LiveStatus = "connecting" | "connected" | "live" | "reconnecting" | "offline";
 
 export interface LiveSnapshot {
   queue: Load<PreparationQueueItem[]>;
@@ -95,6 +98,8 @@ export class StationLiveQueue {
   private wasLive = false;
   private attempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectDueAt = 0;
+  private lastConnectAt = -Infinity;
   private subscribeTimer: ReturnType<typeof setTimeout> | null = null;
 
   private loading: Promise<void> | null = null;
@@ -130,6 +135,28 @@ export class StationLiveQueue {
     this.dropSocket();
     this.abort?.abort();
     this.buffer = [];
+  }
+
+  /**
+   * The network came back or the display became visible again. A pending
+   * reconnect runs now instead of waiting out its backoff, but never sooner
+   * than RECONNECT_BASE_MS after the last attempt (a failure still backs off
+   * further); a subscribed stream reloads the queue, since a sleeping device
+   * may have missed events on a connection that only looks open. Nothing
+   * else changes: refused streams stay off and an attempt in flight is kept.
+   */
+  wake(): void {
+    if (!this.started || this.stopped) return;
+    if (this.reconnectTimer !== null) {
+      const now = Date.now();
+      const earliest = Math.max(now, this.lastConnectAt + RECONNECT_BASE_MS);
+      if (earliest >= this.reconnectDueAt) return;
+      this.clearReconnect();
+      if (earliest === now) this.connect();
+      else this.scheduleConnect(earliest - now);
+      return;
+    }
+    if (this.subscribed && !this.loading) void this.reload();
   }
 
   /**
@@ -230,6 +257,7 @@ export class StationLiveQueue {
     }
     this.socket = socket;
     this.subscribed = false;
+    this.lastConnectAt = Date.now();
     this.setLive(this.wasLive || this.attempt > 0 ? "reconnecting" : "connecting");
 
     socket.onopen = () => {
@@ -268,13 +296,15 @@ export class StationLiveQueue {
       this.clearSubscribeTimer();
       this.attempt = 0;
       this.wasLive = true;
-      this.setLive("live");
+      this.setLive("connected");
       // Events delivered before the subscription are in this load; every
       // later one reaches this connection.
       void this.reload();
       return;
     }
 
+    // Only the delivery worker sends after `subscribed`: delivery works.
+    this.setLive("live");
     if (message.type === "event") this.handleEvent(message.event);
     else if (message.type === "resync") void this.reload();
   }
@@ -303,6 +333,11 @@ export class StationLiveQueue {
     const delay = reconnectDelay(this.attempt, this.random);
     this.attempt += 1;
     this.setLive("reconnecting");
+    this.scheduleConnect(delay);
+  }
+
+  private scheduleConnect(delay: number): void {
+    this.reconnectDueAt = Date.now() + delay;
     this.reconnectTimer = setTimeout(() => this.connect(), delay);
   }
 
@@ -383,6 +418,20 @@ export function useStationLiveQueue(options: UseStationLiveQueueOptions) {
     live.start();
     return () => live.stop();
   }, [stationId, token]);
+
+  useEffect(() => {
+    if (!controller) return;
+    const wake = () => controller.wake();
+    const wakeIfVisible = () => {
+      if (document.visibilityState === "visible") wake();
+    };
+    window.addEventListener("online", wake);
+    document.addEventListener("visibilitychange", wakeIfVisible);
+    return () => {
+      window.removeEventListener("online", wake);
+      document.removeEventListener("visibilitychange", wakeIfVisible);
+    };
+  }, [controller]);
 
   const snapshot = useSyncExternalStore(
     controller?.subscribe ?? subscribeNothing,
