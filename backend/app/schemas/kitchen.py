@@ -30,7 +30,8 @@ class PreparationQueueItem(BaseModel):
     order_id: uuid.UUID
     table_number: int
     table_name: str | None
-    # The product's current name; order items store no name snapshot.
+    # The product's name when the item was added (its current name for
+    # items added before name snapshots).
     product_name: str
     quantity: int
     modifiers: list[PreparationQueueModifier]

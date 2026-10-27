@@ -126,6 +126,13 @@ class OrderItem(Base):
         nullable=False,
     )
 
+    # The product's name when the item was added, like unit_price for its
+    # price. NULL for items added before migration a3d9e7c1f5b2.
+    product_name_snapshot: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
     status: Mapped[str] = mapped_column(
         String(30),
         default="ADDED",

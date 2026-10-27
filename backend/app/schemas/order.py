@@ -37,6 +37,9 @@ class OrderItemResponse(BaseModel):
     id: uuid.UUID
     order_id: uuid.UUID
     product_id: uuid.UUID
+    # The product's name when the item was added; null for items added
+    # before name snapshots (migration a3d9e7c1f5b2).
+    product_name: str | None = Field(default=None, validation_alias="product_name_snapshot")
     quantity: int
     unit_price: float
     total_price: float

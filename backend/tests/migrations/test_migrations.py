@@ -323,6 +323,7 @@ def test_tenant_consistency_triggers_keep_and_report_existing_rows(
     new violations, and its downgrade removes only the triggers."""
 
     import logging
+    import uuid
     from decimal import Decimal
 
     from sqlalchemy.orm import Session
@@ -348,18 +349,22 @@ def test_tenant_consistency_triggers_keep_and_report_existing_rows(
         order = create_order(db, own, status="SENT")
         db.add(misrouted)
         db.flush()
-        item = OrderItem(
-            order_id=order.id,
-            product_id=other.product.id,
-            quantity=1,
-            unit_price=Decimal("12.50"),
-            total_price=Decimal("12.50"),
-            status="SENT",
+        # Inserted with explicit columns: the model may have columns that
+        # this revision does not (e.g. product_name_snapshot).
+        item_id = uuid.uuid4()
+        db.execute(
+            OrderItem.__table__.insert().values(
+                id=item_id,
+                order_id=order.id,
+                product_id=other.product.id,
+                quantity=1,
+                unit_price=Decimal("12.50"),
+                total_price=Decimal("12.50"),
+                status="SENT",
+            )
         )
-        db.add(item)
-        db.flush()
         preparation = Preparation(
-            order_item_id=item.id,
+            order_item_id=item_id,
             station_id=other.station.id,
             status="PENDING",
         )
@@ -367,7 +372,7 @@ def test_tenant_consistency_triggers_keep_and_report_existing_rows(
         db.flush()
         ids = {
             "ck_products_station_restaurant": [misrouted.id],
-            "ck_order_items_product_restaurant": [item.id],
+            "ck_order_items_product_restaurant": [item_id],
             "ck_preparations_station_restaurant": [preparation.id],
         }
         restaurants = (own, other)
@@ -525,3 +530,45 @@ def test_status_check_migration_keeps_rows_and_refuses_unknown_statuses(migratio
     with migration_database.begin() as connection:
         assert connection.scalar(text("SELECT status FROM tables")) == "AVAILABLE"
     assert set(status_checks(migration_database)) == set(STATUS_TABLES)
+
+
+def test_product_name_snapshot_migration_keeps_existing_items(migration_database):
+    """a3d9e7c1f5b2 only adds a nullable column: existing items keep NULL
+    (no backfill), and the downgrade removes the column."""
+
+    migrate(migration_database, command.upgrade, "f4c2a8d6b1e3")
+    with migration_database.begin() as connection:
+        for statement in (
+            "INSERT INTO restaurants (id, name, timezone, currency, is_active, created_at, updated_at) "
+            "VALUES ('11111111-1111-4111-8111-111111111111', 'R', 'UTC', 'EUR', true, now(), now())",
+            "INSERT INTO roles (id, restaurant_id, name, created_at) "
+            "VALUES ('33333333-3333-4333-8333-333333333333', '11111111-1111-4111-8111-111111111111', 'MANAGER', now())",
+            "INSERT INTO users (id, restaurant_id, role_id, name, email, password_hash, is_active, created_at, updated_at) "
+            "VALUES ('44444444-4444-4444-8444-444444444444', '11111111-1111-4111-8111-111111111111', "
+            "'33333333-3333-4333-8333-333333333333', 'U', 'u@example.com', 'x', true, now(), now())",
+            "INSERT INTO tables (id, restaurant_id, number, capacity, status, is_active, created_at, updated_at) "
+            "VALUES ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111', 1, 2, 'OCCUPIED', true, now(), now())",
+            "INSERT INTO categories (id, restaurant_id, name, display_order, is_active, created_at, updated_at) "
+            "VALUES ('55555555-5555-4555-8555-555555555555', '11111111-1111-4111-8111-111111111111', 'C', 1, true, now(), now())",
+            "INSERT INTO products (id, category_id, name, price, is_active, created_at, updated_at) "
+            "VALUES ('66666666-6666-4666-8666-666666666666', '55555555-5555-4555-8555-555555555555', 'Soup', 4.00, true, now(), now())",
+            "INSERT INTO orders (id, restaurant_id, table_id, user_id, guest_count, status, created_at, updated_at) "
+            "VALUES ('77777777-7777-4777-8777-777777777777', '11111111-1111-4111-8111-111111111111', "
+            "'22222222-2222-4222-8222-222222222222', '44444444-4444-4444-8444-444444444444', 1, 'OPEN', now(), now())",
+            "INSERT INTO order_items (id, order_id, product_id, quantity, unit_price, total_price, status, created_at) "
+            "VALUES ('88888888-8888-4888-8888-888888888888', '77777777-7777-4777-8777-777777777777', "
+            "'66666666-6666-4666-8666-666666666666', 1, 4.00, 4.00, 'ADDED', now())",
+        ):
+            connection.execute(text(statement))
+
+    migrate(migration_database, command.upgrade, "a3d9e7c1f5b2")
+    with migration_database.begin() as connection:
+        assert connection.execute(
+            text("SELECT product_name_snapshot, unit_price FROM order_items")
+        ).one() == (None, 4)
+
+    migrate(migration_database, command.downgrade, "f4c2a8d6b1e3")
+    with migration_database.begin() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("order_items")}
+        assert "product_name_snapshot" not in columns
+        assert connection.scalar(text("SELECT count(*) FROM order_items")) == 1

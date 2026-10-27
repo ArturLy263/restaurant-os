@@ -3,6 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from fastapi import status
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -416,6 +417,7 @@ class OrderService:
         item = OrderItem(
             order_id=order.id,
             product_id=product.id,
+            product_name_snapshot=product.name,
             quantity=quantity,
             unit_price=base_price,
             total_price=total_price,
@@ -1512,7 +1514,8 @@ class OrderService:
                 OrderItem.quantity,
                 Table.number,
                 Table.name,
-                Product.name,
+                # Items added before name snapshots show the current name.
+                func.coalesce(OrderItem.product_name_snapshot, Product.name),
                 Order.status,
                 Bill.status,
             )

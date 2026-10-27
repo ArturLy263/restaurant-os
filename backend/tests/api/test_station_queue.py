@@ -216,15 +216,16 @@ def test_modifier_names_are_the_stored_snapshots(pos, db_session, restaurant, ex
     ]
 
 
-def test_product_name_is_the_current_name(pos, db_session, restaurant):
-    """Order items store no product name, so a rename shows at once."""
+def test_product_name_is_the_name_when_ordered(pos, db_session, restaurant):
+    """Order items keep the product's name (a3d9e7c1f5b2), so a rename does
+    not change work already queued; see test_product_name_snapshot.py."""
 
     pos.sent_order()
     restaurant.product.name = "Cheeseburger"
     db_session.flush()
 
     burger, coke = queue(pos, restaurant.station)
-    assert (burger["product_name"], coke["product_name"]) == ("Cheeseburger", "Coca-Cola")
+    assert (burger["product_name"], coke["product_name"]) == ("Burger", "Coca-Cola")
 
 
 def test_queue_shows_only_its_restaurants_work(pos, db_session, restaurant):

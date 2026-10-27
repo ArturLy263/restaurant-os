@@ -331,8 +331,12 @@ a kitchen or bar display shows:
 ```
 
 `modifiers` are the names stored when the item was added (sorted by
-name); `product_name` is the product's current name, since order items
-store no name of their own. `table_name` may be `null`. Prices are not
+name), and so is `product_name` (`order_items.product_name_snapshot`,
+migration `a3d9e7c1f5b2`): renaming a product does not change work already
+ordered. Items added before that migration have no stored name and show
+the product's current name; they are not backfilled. Order responses
+expose the stored name as `items[].product_name` (`null` for those older
+items). `table_name` may be `null`. Prices are not
 included. `order_status` is the order's status and `bill_status` its
 bill's (`null` before the order is billed).
 
