@@ -1,24 +1,49 @@
 # RestaurantOS
 
-Restaurant management platform designed from
-real restaurant operational experience.
+[![CI](https://github.com/ArturLy263/restaurant-os/actions/workflows/ci.yml/badge.svg)](https://github.com/ArturLy263/restaurant-os/actions/workflows/ci.yml)
 
-## Goal
+Backend for restaurant order, kitchen and billing workflows, designed from my experience working in
+restaurant kitchens. It is a portfolio project, not a production system.
 
-Build a system that connects:
+## What it does today
 
-- Tables
-- Orders
-- Menu
-- Kitchen
-- Printers
-- Payments
-- Inventory
-- Analytics
+- **Orders → kitchen → bill → payment** through a versioned REST API (FastAPI, `/api/v1`), with
+  preparation states `PENDING → IN_PROGRESS → READY → SERVED`.
+- **PostgreSQL data model** managed with SQLAlchemy 2 and Alembic migrations; migration tests check
+  upgrade/downgrade round-trips and that models match the migrated schema.
+- **Data integrity under concurrency:** writes lock the order row (`SELECT … FOR UPDATE`);
+  concurrency tests coordinate real connections through PostgreSQL's lock graph.
+- **Idempotency keys** for payments and other mutations, committed in the same transaction as the
+  business change.
+- **Role-based permissions** (waiter, kitchen, bar, cashier, manager) and per-station access.
+- **Audit trail:** order, kitchen and billing actions are recorded in `operational_events` with the acting user.
+- **CI** (GitHub Actions + PostgreSQL 16 service): unit, integration and migration test suites.
 
-## Status
+Not built yet: APIs for menu, table, user and role management; printers; inventory; analytics.
 
-🟡 Project discovery / planning
+```mermaid
+flowchart LR
+    Client -->|HTTP + JWT| API[FastAPI routes]
+    API --> Perm[Permission and station checks]
+    Perm --> Svc[Services]
+    Svc --> UoW[Unit of work / repositories]
+    UoW --> PG[(PostgreSQL 16)]
+    Svc --> Ev[operational_events audit log]
+    Ev --> PG
+```
+
+## Quick start
+
+```bash
+cp .env.example .env              # then edit the values
+docker compose up -d postgres
+python3.14 -m venv .venv && source .venv/bin/activate
+pip install -r backend/requirements-test.txt -c backend/constraints.txt
+alembic upgrade head
+python backend/seed.py            # once, on an empty database
+uvicorn app.main:app --app-dir backend --reload   # docs at http://127.0.0.1:8000/docs
+pytest -m unit                    # no database needed
+```
 
 ## Project layout
 
