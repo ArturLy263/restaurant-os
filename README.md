@@ -2,8 +2,9 @@
 
 [![CI](https://github.com/ArturLy263/restaurant-os/actions/workflows/ci.yml/badge.svg)](https://github.com/ArturLy263/restaurant-os/actions/workflows/ci.yml)
 
-Backend for restaurant order, kitchen and billing workflows, designed from my experience working in
-restaurant kitchens. It is a portfolio project, not a production system.
+Backend for restaurant order, kitchen and billing workflows, plus a kitchen display (KDS) frontend,
+designed from my experience working in restaurant kitchens. It is a portfolio project, not a
+production system.
 
 ## What it does today
 
@@ -17,9 +18,21 @@ restaurant kitchens. It is a portfolio project, not a production system.
   business change.
 - **Role-based permissions** (waiter, kitchen, bar, cashier, manager) and per-station access.
 - **Audit trail:** order, kitchen and billing actions are recorded in `operational_events` with the acting user.
-- **CI** (GitHub Actions + PostgreSQL 16 service): unit, integration and migration test suites.
+- **Transactional outbox:** domain events are written in the same transaction as the change; a
+  delivery worker claims them with `FOR UPDATE SKIP LOCKED`, retries with backoff, dead-letters after
+  repeated failures and keeps each order's events in order. Event payloads are versioned contracts.
+- **Station event streams:** authenticated, station-scoped WebSockets that push outbox events to
+  kitchen and bar displays.
+- **Tenant consistency:** database triggers keep each restaurant's records apart; central status
+  rules backed by CHECK constraints.
+- **Kitchen display** ([`frontend/`](frontend/README.md), React + TypeScript + Vite): sign-in, station
+  queue, start / ready / serve, live updates with reconnect; unit and component tests (Vitest) and a
+  headless-Chrome test against a mock API.
+- **CI** (GitHub Actions): backend unit, integration and migration suites against a PostgreSQL 16
+  service; frontend type check, tests and production build.
 
-Not built yet: APIs for menu, table, user and role management; printers; inventory; analytics.
+Not built yet: APIs for menu, table, user and role management; printers; inventory; analytics;
+deployment.
 
 ```mermaid
 flowchart LR
@@ -30,6 +43,12 @@ flowchart LR
     UoW --> PG[(PostgreSQL 16)]
     Svc --> Ev[operational_events audit log]
     Ev --> PG
+    Svc --> OB[outbox_events]
+    OB --> PG
+    PG -.claimed by.-> W[Outbox worker]
+    W --> WS[Station WebSocket streams]
+    WS --> KDS[Kitchen display<br/>React frontend]
+    KDS -->|HTTP + JWT| API
 ```
 
 ## Quick start
@@ -59,7 +78,10 @@ backend/requirements-test.txt  pinned test dependencies (includes runtime)
 backend/constraints.txt     exact versions of all transitive dependencies
 backend/seed.py             demo data for an empty database (run once)
 backend/tests/              test suite
-.github/workflows/ci.yml    CI: unit, integration and migration tests
+backend/app/workers/        outbox delivery worker
+frontend/                   kitchen display (React + TypeScript), see frontend/README.md
+scripts/                    maintenance scripts
+.github/workflows/ci.yml    CI: backend unit, integration and migration tests; frontend checks
 ```
 
 ## Development setup
@@ -1019,8 +1041,11 @@ on pull requests, with Python 3.14 and a PostgreSQL 16 service container.
 It installs the pinned dependencies, runs `pip check`, the unit tests
 without a database, a negative check that a missing test database fails
 the run, the integration tests and the migration tests, all with
-`REQUIRE_TEST_DATABASE=1`. It uses only throwaway credentials for the
-job-local database and needs no secrets.
+`REQUIRE_TEST_DATABASE=1`. A separate `frontend` job (Node 22) installs
+exactly the lockfile (`npm ci`), type-checks, runs the Vitest suite and
+builds the production bundle; the headless-Chrome test (`npm run e2e`) is
+run locally only. CI uses only throwaway credentials for the job-local
+database and needs no secrets.
 
 ## Updating dependencies
 
