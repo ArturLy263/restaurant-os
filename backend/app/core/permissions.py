@@ -44,6 +44,9 @@ class Permission(StrEnum):
     PREPARATIONS_SERVE = "preparations:serve"
     # Not limited to assigned stations.
     PREPARATIONS_ALL_STATIONS = "preparations:all_stations"
+    # Cancel an unfinished preparation of a fully paid (CLOSED) order,
+    # e.g. the guest left; no financial effect. Management only.
+    PREPARATIONS_DISCARD = "preparations:discard"
 
     # Bills and payments
     BILLS_VIEW = "bills:view"

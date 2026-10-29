@@ -2,9 +2,10 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.states import PREPARATION, status_check
 from app.db.database import Base
 
 if TYPE_CHECKING:
@@ -16,6 +17,10 @@ class Preparation(Base):
 
     # An order item is sent at most once, so it has at most one preparation.
     __table_args__ = (
+        CheckConstraint(
+            status_check(PREPARATION),
+            name="ck_preparations_status",
+        ),
         UniqueConstraint(
             "order_item_id",
             name="uq_preparations_order_item_id",

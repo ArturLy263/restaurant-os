@@ -6,6 +6,7 @@ from fastapi import status
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError, ErrorCode
+from app.core.states import BILL, ORDER, TABLE
 from app.db.models.bill import Bill, Payment
 from app.db.models.order import Order, OrderItem
 from app.db.models.table import Table
@@ -233,16 +234,16 @@ class BillService:
         if new_paid_amount == adjusted_total:
             now = datetime.utcnow()
 
-            bill.status = "PAID"
+            BILL.apply(bill, "PAID")
             bill.paid_at = now
 
-            order.status = "CLOSED"
+            ORDER.apply(order, "CLOSED")
             order.closed_at = now
 
             table = db.get(Table, order.table_id)
 
             if table is not None:
-                table.status = "AVAILABLE"
+                TABLE.apply(table, "AVAILABLE")
 
             EventService.record(
                 db=db,

@@ -14,6 +14,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.states import BILL, BILL_ADJUSTMENT, PAYMENT, status_check
 from app.db.database import Base
 
 if TYPE_CHECKING:
@@ -24,6 +25,13 @@ if TYPE_CHECKING:
 
 class Bill(Base):
     __tablename__ = "bills"
+
+    __table_args__ = (
+        CheckConstraint(
+            status_check(BILL),
+            name="ck_bills_status",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True,
@@ -117,6 +125,13 @@ class Bill(Base):
 class Payment(Base):
     __tablename__ = "payments"
 
+    __table_args__ = (
+        CheckConstraint(
+            status_check(PAYMENT),
+            name="ck_payments_status",
+        ),
+    )
+
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True,
         default=uuid.uuid4,
@@ -164,6 +179,10 @@ class BillAdjustment(Base):
     __tablename__ = "bill_adjustments"
 
     __table_args__ = (
+        CheckConstraint(
+            status_check(BILL_ADJUSTMENT),
+            name="ck_bill_adjustments_status",
+        ),
         CheckConstraint(
             "amount <> 0",
             name="ck_bill_adjustments_amount_nonzero",

@@ -9,12 +9,14 @@ back to DATABASE_URL.
 Limitations of the models-versus-migrations comparison (Alembic
 autogenerate): it compares tables, columns, column types, nullability,
 indexes, unique constraints and foreign keys. It does not compare server
-defaults (not enabled here), CHECK constraints, triggers, functions,
+defaults (not enabled here), CHECK constraints (see
+test_status_checks_match_the_state_rules), triggers, functions,
 sequences or other objects created with raw SQL, and it cannot detect
 data migrations that are wrong. A renamed column or table shows up as a
 drop plus an add.
 """
 
+import re
 from pathlib import Path
 
 from alembic import command
@@ -22,7 +24,9 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
+import pytest
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import IntegrityError
 
 from app.db import models  # noqa: F401 - registers every model
 from app.db.database import Base
@@ -47,7 +51,8 @@ def current_revision(database):
 
 
 def schema_snapshot(database):
-    """Tables, columns, keys, indexes and enum types in the public schema."""
+    """Tables, columns, keys, indexes, CHECK constraints, triggers,
+    functions and enum types in the public schema."""
 
     with database.begin() as connection:
         inspector = inspect(connection)
@@ -72,7 +77,33 @@ def schema_snapshot(database):
                     (ix["name"], tuple(ix["column_names"]), ix["unique"])
                     for ix in inspector.get_indexes(table)
                 ),
+                "checks": sorted(
+                    (ck["name"], ck["sqltext"])
+                    for ck in inspector.get_check_constraints(table)
+                ),
             }
+
+        # Raw-SQL objects the inspector does not see (e.g. the tenant
+        # consistency triggers of e1b7d3a9c4f2).
+        snapshot["<triggers>"] = sorted(
+            connection.execute(
+                text(
+                    "SELECT c.relname, t.tgname FROM pg_trigger t "
+                    "JOIN pg_class c ON c.oid = t.tgrelid "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = 'public' AND NOT t.tgisinternal"
+                )
+            ).all()
+        )
+        snapshot["<functions>"] = sorted(
+            connection.scalars(
+                text(
+                    "SELECT p.proname FROM pg_proc p "
+                    "JOIN pg_namespace n ON n.oid = p.pronamespace "
+                    "WHERE n.nspname = 'public'"
+                )
+            )
+        )
 
         snapshot["<enum types>"] = sorted(
             connection.scalars(
@@ -162,3 +193,382 @@ def test_models_match_migrations(migration_database):
         "`alembic revision --autogenerate`:\n"
         + "\n".join(map(str, differences))
     )
+
+
+def test_outbox_delivery_tracking_keeps_existing_events(migration_database):
+    """a7d3e5f1c9b4 adds delivery columns without changing existing events,
+    and its downgrade removes them without losing the events."""
+
+    migrate(migration_database, command.upgrade, "f3a9c1e7b5d2")
+
+    event = {
+        "id": "8b0f4c1e-1d2a-4c3b-9e8f-0a1b2c3d4e5f",
+        "restaurant_id": "1f2e3d4c-5b6a-4978-8a9b-0c1d2e3f4a5b",
+        "aggregate_id": "2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d",
+    }
+    original_columns = (
+        "id, restaurant_id, event_type, schema_version, aggregate_type, "
+        "aggregate_id, payload::text, created_at, published_at"
+    )
+
+    with migration_database.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO restaurants (id, name, timezone, currency, "
+                "is_active, created_at, updated_at) VALUES (:r, 'Migrated', "
+                "'UTC', 'EUR', true, now(), now())"
+            ),
+            {"r": event["restaurant_id"]},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO outbox_events (id, restaurant_id, event_type, "
+                "schema_version, aggregate_type, aggregate_id, payload) "
+                "VALUES (:id, :restaurant_id, 'order.sent', 1, 'order', "
+                ":aggregate_id, '{\"order_id\": \"x\"}')"
+            ),
+            event,
+        )
+        before = connection.execute(
+            text(f"SELECT {original_columns} FROM outbox_events")
+        ).one()
+
+    migrate(migration_database, command.upgrade, "a7d3e5f1c9b4")
+
+    with migration_database.begin() as connection:
+        assert connection.execute(
+            text(f"SELECT {original_columns} FROM outbox_events")
+        ).one() == before
+        attempts, last_attempt_at, next_attempt_at, last_error = connection.execute(
+            text(
+                "SELECT attempts, last_attempt_at, next_attempt_at, last_error "
+                "FROM outbox_events"
+            )
+        ).one()
+        assert (attempts, last_attempt_at, last_error) == (0, None, None)
+        assert next_attempt_at is not None
+
+    migrate(migration_database, command.downgrade, "f3a9c1e7b5d2")
+
+    with migration_database.begin() as connection:
+        assert connection.execute(
+            text(f"SELECT {original_columns} FROM outbox_events")
+        ).one() == before
+
+
+def test_outbox_dead_letter_migration_keeps_existing_events(migration_database):
+    """c5e8a2d4f6b1 adds dead_lettered_at (NULL for every existing event)
+    and its CHECK, which existing delivered and failing rows satisfy; the
+    downgrade drops them without losing events."""
+
+    migrate(migration_database, command.upgrade, "a7d3e5f1c9b4")
+
+    restaurant_id = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f"
+    columns = (
+        "id, restaurant_id, event_type, schema_version, aggregate_type, "
+        "aggregate_id, payload::text, created_at, published_at, attempts, "
+        "last_attempt_at, next_attempt_at, last_error"
+    )
+
+    with migration_database.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO restaurants (id, name, timezone, currency, "
+                "is_active, created_at, updated_at) VALUES (:r, 'Migrated', "
+                "'UTC', 'EUR', true, now(), now())"
+            ),
+            {"r": restaurant_id},
+        )
+        for event_id, published, attempts, error in (
+            ("4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f7a", "now()", 1, None),
+            ("5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b", "NULL", 7, "RuntimeError: down"),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO outbox_events (id, restaurant_id, event_type, "
+                    "schema_version, aggregate_type, aggregate_id, payload, "
+                    f"published_at, attempts, last_attempt_at, last_error) "
+                    f"VALUES (:id, :r, 'order.sent', 1, 'order', :id, "
+                    f"'{{\"order_id\": \"x\"}}', {published}, :attempts, now(), :error)"
+                ),
+                {"id": event_id, "r": restaurant_id, "attempts": attempts, "error": error},
+            )
+        before = connection.execute(
+            text(f"SELECT {columns} FROM outbox_events ORDER BY id")
+        ).all()
+
+    migrate(migration_database, command.upgrade, "c5e8a2d4f6b1")
+
+    with migration_database.begin() as connection:
+        assert connection.execute(
+            text(f"SELECT {columns} FROM outbox_events ORDER BY id")
+        ).all() == before
+        assert connection.scalars(
+            text("SELECT dead_lettered_at FROM outbox_events")
+        ).all() == [None, None]
+
+    migrate(migration_database, command.downgrade, "a7d3e5f1c9b4")
+
+    with migration_database.begin() as connection:
+        assert connection.execute(
+            text(f"SELECT {columns} FROM outbox_events ORDER BY id")
+        ).all() == before
+
+
+def test_tenant_consistency_triggers_keep_and_report_existing_rows(
+    migration_database,
+):
+    """e1b7d3a9c4f2 installs the tenant consistency triggers without
+    changing existing rows that violate them, reports those rows, rejects
+    new violations, and its downgrade removes only the triggers."""
+
+    import logging
+    import uuid
+    from decimal import Decimal
+
+    from sqlalchemy.orm import Session
+
+    from app.db.models.order import OrderItem
+    from app.db.models.preparation import Preparation
+    from app.db.models.product import Product
+    from tests.factories import create_order, create_restaurant
+
+    migrate(migration_database, command.upgrade, "c5e8a2d4f6b1")
+
+    with migration_database.begin() as connection:
+        db = Session(bind=connection)
+        own = create_restaurant(db, name="Own")
+        other = create_restaurant(db, name="Other")
+
+        misrouted = Product(
+            category_id=own.category.id,
+            name="Misrouted",
+            price=Decimal("1.00"),
+            station_id=other.station.id,
+        )
+        order = create_order(db, own, status="SENT")
+        db.add(misrouted)
+        db.flush()
+        # Inserted with explicit columns: the model may have columns that
+        # this revision does not (e.g. product_name_snapshot).
+        item_id = uuid.uuid4()
+        db.execute(
+            OrderItem.__table__.insert().values(
+                id=item_id,
+                order_id=order.id,
+                product_id=other.product.id,
+                quantity=1,
+                unit_price=Decimal("12.50"),
+                total_price=Decimal("12.50"),
+                status="SENT",
+            )
+        )
+        preparation = Preparation(
+            order_item_id=item_id,
+            station_id=other.station.id,
+            status="PENDING",
+        )
+        db.add(preparation)
+        db.flush()
+        ids = {
+            "ck_products_station_restaurant": [misrouted.id],
+            "ck_order_items_product_restaurant": [item_id],
+            "ck_preparations_station_restaurant": [preparation.id],
+        }
+        restaurants = (own, other)
+        db.close()
+
+    tables = ("products", "order_items", "preparations")
+
+    def rows():
+        with migration_database.begin() as connection:
+            return {
+                table: connection.execute(
+                    text(f"SELECT * FROM {table} ORDER BY id")
+                ).all()
+                for table in tables
+            }
+
+    before = rows()
+
+    # env.py's fileConfig removes handlers from alembic's loggers, so the
+    # report is captured on the logger object itself.
+    reports = []
+    logger = logging.getLogger("alembic.tenant_consistency")
+    logger.warning = lambda message, *args: reports.append(message % args)
+    try:
+        migrate(migration_database, command.upgrade, "e1b7d3a9c4f2")
+    finally:
+        del logger.warning
+
+    assert rows() == before
+    reported = "\n".join(reports)
+    for constraint, row_ids in ids.items():
+        assert constraint in reported
+        assert all(str(row_id) in reported for row_id in row_ids)
+
+    module = SCRIPT.get_revision("e1b7d3a9c4f2").module
+    with migration_database.begin() as connection:
+        assert module.historical_violations(connection) == ids
+
+    own, other = restaurants
+    with migration_database.begin() as connection:
+        # Unrelated updates of the existing rows keep working.
+        connection.execute(
+            text("UPDATE preparations SET status = 'CANCELLED' WHERE id = :id"),
+            {"id": ids["ck_preparations_station_restaurant"][0]},
+        )
+        connection.execute(
+            text("UPDATE order_items SET status = 'CANCELLED' WHERE id = :id"),
+            {"id": ids["ck_order_items_product_restaurant"][0]},
+        )
+        connection.execute(
+            text("UPDATE products SET name = 'Renamed' WHERE id = :id"),
+            {"id": ids["ck_products_station_restaurant"][0]},
+        )
+
+    # New violations are rejected.
+    with pytest.raises(IntegrityError) as error:
+        with migration_database.begin() as connection:
+            connection.execute(
+                text("UPDATE products SET station_id = :s WHERE id = :p"),
+                {"s": other.station.id, "p": own.product.id},
+            )
+
+    assert error.value.orig.diag.constraint_name == "ck_products_station_restaurant"
+
+    migrate(migration_database, command.downgrade, "c5e8a2d4f6b1")
+
+    with migration_database.begin() as connection:
+        assert connection.scalar(
+            text(
+                "SELECT count(*) FROM pg_trigger "
+                "WHERE tgname LIKE 'trg_%_restaurant'"
+            )
+        ) == 0
+        # Without the triggers the same update is accepted again.
+        connection.execute(
+            text("UPDATE products SET station_id = :s WHERE id = :p"),
+            {"s": other.station.id, "p": own.product.id},
+        )
+
+
+STATUS_TABLES = ("orders", "order_items", "preparations", "bills", "tables", "payments", "bill_adjustments")
+
+
+def status_checks(database):
+    with database.begin() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT conrelid::regclass::text, conname, pg_get_constraintdef(oid) "
+                "FROM pg_constraint WHERE contype = 'c' AND conname LIKE 'ck_%_status'"
+            )
+        ).all()
+    return {table: (name, definition) for table, name, definition in rows}
+
+
+def test_status_checks_match_the_state_rules(migration_database):
+    """f4c2a8d6b1e3 allows exactly the statuses of app.core.states."""
+
+    from app.core.states import BY_TABLE
+
+    migrate(migration_database, command.upgrade, "head")
+    checks = status_checks(migration_database)
+
+    assert set(checks) == set(BY_TABLE) == set(STATUS_TABLES)
+    for table, machine in BY_TABLE.items():
+        name, definition = checks[table]
+        assert name == f"ck_{table}_status"
+        allowed = set(re.findall(r"'([A-Z_]+)'", definition))
+        assert allowed == machine.statuses, table
+
+    with migration_database.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO restaurants (id, name, timezone, currency, is_active, created_at, updated_at) "
+                "VALUES ('11111111-1111-4111-8111-111111111111', 'R', 'UTC', 'EUR', true, now(), now())"
+            )
+        )
+        with pytest.raises(IntegrityError, match="ck_tables_status"), connection.begin_nested():
+            connection.execute(
+                text(
+                    "INSERT INTO tables (id, restaurant_id, number, capacity, status, is_active, created_at, updated_at) "
+                    "VALUES ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111', "
+                    "1, 2, 'BROKEN', true, now(), now())"
+                )
+            )
+
+
+def test_status_check_migration_keeps_rows_and_refuses_unknown_statuses(migration_database):
+    """f4c2a8d6b1e3 changes no row; with an unknown status it stops before
+    adding any constraint, so nothing is half applied."""
+
+    migrate(migration_database, command.upgrade, "e1b7d3a9c4f2")
+    with migration_database.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO restaurants (id, name, timezone, currency, is_active, created_at, updated_at) "
+                "VALUES ('11111111-1111-4111-8111-111111111111', 'R', 'UTC', 'EUR', true, now(), now())"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO tables (id, restaurant_id, number, capacity, status, is_active, created_at, updated_at) "
+                "VALUES ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111', "
+                "1, 2, 'RESERVED', true, now(), now())"
+            )
+        )
+
+    with pytest.raises(RuntimeError, match=r"tables.*RESERVED"):
+        migrate(migration_database, command.upgrade, "f4c2a8d6b1e3")
+    assert current_revision(migration_database) == "e1b7d3a9c4f2"
+    assert status_checks(migration_database) == {}
+
+    with migration_database.begin() as connection:
+        connection.execute(text("UPDATE tables SET status = 'AVAILABLE'"))
+    migrate(migration_database, command.upgrade, "f4c2a8d6b1e3")
+    with migration_database.begin() as connection:
+        assert connection.scalar(text("SELECT status FROM tables")) == "AVAILABLE"
+    assert set(status_checks(migration_database)) == set(STATUS_TABLES)
+
+
+def test_product_name_snapshot_migration_keeps_existing_items(migration_database):
+    """a3d9e7c1f5b2 only adds a nullable column: existing items keep NULL
+    (no backfill), and the downgrade removes the column."""
+
+    migrate(migration_database, command.upgrade, "f4c2a8d6b1e3")
+    with migration_database.begin() as connection:
+        for statement in (
+            "INSERT INTO restaurants (id, name, timezone, currency, is_active, created_at, updated_at) "
+            "VALUES ('11111111-1111-4111-8111-111111111111', 'R', 'UTC', 'EUR', true, now(), now())",
+            "INSERT INTO roles (id, restaurant_id, name, created_at) "
+            "VALUES ('33333333-3333-4333-8333-333333333333', '11111111-1111-4111-8111-111111111111', 'MANAGER', now())",
+            "INSERT INTO users (id, restaurant_id, role_id, name, email, password_hash, is_active, created_at, updated_at) "
+            "VALUES ('44444444-4444-4444-8444-444444444444', '11111111-1111-4111-8111-111111111111', "
+            "'33333333-3333-4333-8333-333333333333', 'U', 'u@example.com', 'x', true, now(), now())",
+            "INSERT INTO tables (id, restaurant_id, number, capacity, status, is_active, created_at, updated_at) "
+            "VALUES ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111', 1, 2, 'OCCUPIED', true, now(), now())",
+            "INSERT INTO categories (id, restaurant_id, name, display_order, is_active, created_at, updated_at) "
+            "VALUES ('55555555-5555-4555-8555-555555555555', '11111111-1111-4111-8111-111111111111', 'C', 1, true, now(), now())",
+            "INSERT INTO products (id, category_id, name, price, is_active, created_at, updated_at) "
+            "VALUES ('66666666-6666-4666-8666-666666666666', '55555555-5555-4555-8555-555555555555', 'Soup', 4.00, true, now(), now())",
+            "INSERT INTO orders (id, restaurant_id, table_id, user_id, guest_count, status, created_at, updated_at) "
+            "VALUES ('77777777-7777-4777-8777-777777777777', '11111111-1111-4111-8111-111111111111', "
+            "'22222222-2222-4222-8222-222222222222', '44444444-4444-4444-8444-444444444444', 1, 'OPEN', now(), now())",
+            "INSERT INTO order_items (id, order_id, product_id, quantity, unit_price, total_price, status, created_at) "
+            "VALUES ('88888888-8888-4888-8888-888888888888', '77777777-7777-4777-8777-777777777777', "
+            "'66666666-6666-4666-8666-666666666666', 1, 4.00, 4.00, 'ADDED', now())",
+        ):
+            connection.execute(text(statement))
+
+    migrate(migration_database, command.upgrade, "a3d9e7c1f5b2")
+    with migration_database.begin() as connection:
+        assert connection.execute(
+            text("SELECT product_name_snapshot, unit_price FROM order_items")
+        ).one() == (None, 4)
+
+    migrate(migration_database, command.downgrade, "f4c2a8d6b1e3")
+    with migration_database.begin() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("order_items")}
+        assert "product_name_snapshot" not in columns
+        assert connection.scalar(text("SELECT count(*) FROM order_items")) == 1

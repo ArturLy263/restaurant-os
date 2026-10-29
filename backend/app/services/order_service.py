@@ -3,11 +3,20 @@ from datetime import datetime
 from decimal import Decimal
 
 from fastapi import status
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError, ErrorCode
 from app.core.permissions import Permission
+from app.core.states import (
+    BILL,
+    ORDER,
+    ORDER_ITEM,
+    PREPARATION,
+    PREPARATION_STEPS,
+    TABLE,
+)
 from app.db.models.bill import Bill, BillAdjustment
 from app.db.models.category import Category
 from app.db.models.modifier import (
@@ -24,7 +33,15 @@ from app.db.unit_of_work import commit
 from app.repositories.bill_repository import BillRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.table_repository import TableRepository
+from app.schemas.kitchen import PreparationQueueItem, PreparationQueueModifier
+from app.schemas.outbox import (
+    OrderSentV1,
+    PreparationStatusChangedV1,
+    preparation_status_changed,
+    SentOrderItem,
+)
 from app.services.event_service import EventService
+from app.services.outbox_service import OutboxService
 
 
 # Orders take new items, and further sends, until they are closed or
@@ -207,7 +224,7 @@ class OrderService:
             },
         )
 
-        table.status = "OCCUPIED"
+        TABLE.apply(table, "OCCUPIED")
 
         commit(db)
         db.refresh(order)
@@ -400,6 +417,7 @@ class OrderService:
         item = OrderItem(
             order_id=order.id,
             product_id=product.id,
+            product_name_snapshot=product.name,
             quantity=quantity,
             unit_price=base_price,
             total_price=total_price,
@@ -522,6 +540,7 @@ class OrderService:
             )
 
         sent_item_ids: list[str] = []
+        sent: list[tuple[OrderItem, Preparation]] = []
 
         for item in items:
 
@@ -555,24 +574,47 @@ class OrderService:
                     message=f"Product is not active: {product.id}",
                 )
 
-            if not product.station_id:
+            # Another restaurant's station counts as none, so its
+            # existence is not revealed.
+            station = (
+                db.query(Station)
+                .filter(
+                    Station.id == product.station_id,
+                    Station.restaurant_id == restaurant_id,
+                )
+                .first()
+                if product.station_id
+                else None
+            )
+
+            if station is None:
                 raise ApiError(
                     status_code=status.HTTP_409_CONFLICT,
                     code=ErrorCode.PRODUCT_HAS_NO_STATION,
                     message=f"Product {product.id} has no station",
                 )
 
-            item.status = "SENT"
+            # Checked when sending, not when adding: the station may be
+            # reactivated in between.
+            if not station.is_active:
+                raise ApiError(
+                    status_code=status.HTTP_409_CONFLICT,
+                    code=ErrorCode.STATION_INACTIVE,
+                    message=f"Station {station.name} is inactive",
+                )
+
+            ORDER_ITEM.apply(item, "SENT")
             item.sent_at = datetime.utcnow()
 
             preparation = Preparation(
                 order_item_id=item.id,
-                station_id=product.station_id,
+                station_id=station.id,
                 status="PENDING",
             )
 
             db.add(preparation)
             sent_item_ids.append(str(item.id))
+            sent.append((item, preparation))
 
         if not sent_item_ids:
             raise ApiError(
@@ -603,7 +645,7 @@ class OrderService:
             raise
 
         is_initial_send = order.status == "OPEN"
-        order.status = "SENT"
+        ORDER.apply(order, "SENT")
 
         EventService.record(
             db=db,
@@ -618,6 +660,27 @@ class OrderService:
                 "item_ids": sent_item_ids,
                 "initial": is_initial_send,
             },
+        )
+
+        # Preparation ids exist since the flush above.
+        OutboxService.record(
+            db=db,
+            restaurant_id=restaurant_id,
+            payload=OrderSentV1(
+                order_id=order.id,
+                table_id=order.table_id,
+                initial=is_initial_send,
+                items=[
+                    SentOrderItem(
+                        order_item_id=item.id,
+                        preparation_id=preparation.id,
+                        station_id=preparation.station_id,
+                        product_id=item.product_id,
+                        quantity=item.quantity,
+                    )
+                    for item, preparation in sent
+                ],
+            ),
         )
 
         commit(db)
@@ -821,14 +884,14 @@ class OrderService:
         previous_item_status = item.status
 
         # Perform cancellation
-        item.status = "CANCELLED"
+        ORDER_ITEM.apply(item, "CANCELLED")
         item.cancelled_at = now
 
         cancelled_preps = []
         for prep in preparations:
             if prep.status in ("PENDING", "IN_PROGRESS"):
                 prep_previous_status = prep.status
-                prep.status = "CANCELLED"
+                PREPARATION.apply(prep, "CANCELLED")
                 prep.cancelled_at = now
                 cancelled_preps.append({
                     "preparation_id": str(prep.id),
@@ -850,6 +913,19 @@ class OrderService:
                         "previous_status": prep_previous_status,
                         "reason": reason,
                     },
+                )
+
+                OutboxService.record(
+                    db=db,
+                    restaurant_id=order.restaurant_id,
+                    payload=PreparationStatusChangedV1(
+                        preparation_id=prep.id,
+                        order_id=order.id,
+                        order_item_id=item.id,
+                        station_id=prep.station_id,
+                        previous_status=prep_previous_status,
+                        status="CANCELLED",
+                    ),
                 )
 
         item_event_metadata = {
@@ -1021,7 +1097,7 @@ class OrderService:
         previous_status = order.status
 
         if bill is not None:
-            bill.status = "VOID"
+            BILL.apply(bill, "VOID")
             bill.voided_at = now
 
             EventService.record(
@@ -1041,13 +1117,13 @@ class OrderService:
                 },
             )
 
-        order.status = "CANCELLED"
+        ORDER.apply(order, "CANCELLED")
         order.cancelled_at = now
 
         table = db.get(Table, order.table_id)
 
         if table is not None:
-            table.status = "AVAILABLE"
+            TABLE.apply(table, "AVAILABLE")
 
         EventService.record(
             db=db,
@@ -1096,19 +1172,18 @@ class OrderService:
         return order
 
     @staticmethod
-    def update_preparation_status(
+    def _lock_preparation(
         db: Session,
         restaurant_id: uuid.UUID,
-        user_id: uuid.UUID,
         preparation_id: uuid.UUID,
-        new_status: str,
         *,
         station_scope: frozenset[uuid.UUID] | None,
-    ) -> Preparation:
-        """Move a preparation to `new_status`.
+    ) -> tuple[Order, Preparation]:
+        """The restaurant's preparation and its order, with the order row
+        locked and the preparation re-read under the lock.
 
-        `station_scope` is the set of stations the user may work, or None
-        for all; required, so a caller cannot forget it.
+        Raises 404 PREPARATION_NOT_FOUND (also for another restaurant's) or
+        403 STATION_ACCESS_DENIED.
         """
 
         found = (
@@ -1157,15 +1232,34 @@ class OrderService:
             .one()
         )
 
+        return order, preparation
+
+    @staticmethod
+    def update_preparation_status(
+        db: Session,
+        restaurant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        preparation_id: uuid.UUID,
+        new_status: str,
+        *,
+        station_scope: frozenset[uuid.UUID] | None,
+    ) -> Preparation:
+        """Move a preparation to `new_status`.
+
+        `station_scope` is the set of stations the user may work, or None
+        for all; required, so a caller cannot forget it.
+        """
+
+        order, preparation = OrderService._lock_preparation(
+            db,
+            restaurant_id,
+            preparation_id,
+            station_scope=station_scope,
+        )
+
         current_status = preparation.status
 
-        valid_transitions = {
-            "PENDING": "IN_PROGRESS",
-            "IN_PROGRESS": "READY",
-            "READY": "SERVED",
-        }
-
-        expected_next_status = valid_transitions.get(current_status)
+        expected_next_status = PREPARATION_STEPS.get(current_status)
 
         if expected_next_status != new_status:
             raise ApiError(
@@ -1179,7 +1273,7 @@ class OrderService:
 
         now = datetime.utcnow()
 
-        preparation.status = new_status
+        PREPARATION.apply(preparation, new_status)
 
         if new_status == "IN_PROGRESS":
             preparation.started_at = now
@@ -1232,21 +1326,125 @@ class OrderService:
             },
         )
 
+        OutboxService.record(
+            db=db,
+            restaurant_id=restaurant_id,
+            payload=PreparationStatusChangedV1(
+                preparation_id=preparation.id,
+                order_id=order.id,
+                order_item_id=preparation.order_item_id,
+                station_id=preparation.station_id,
+                previous_status=current_status,
+                status=new_status,
+            ),
+        )
+
         commit(db)
         db.refresh(preparation)
 
         return preparation
 
     @staticmethod
-    def get_station_preparations(
+    def discard_preparation(
+        db: Session,
+        restaurant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        preparation_id: uuid.UUID,
+        reason: str,
+        *,
+        station_scope: frozenset[uuid.UUID] | None,
+    ) -> Preparation:
+        """Cancel an unfinished preparation of a fully paid order.
+
+        Payment is not service: a CLOSED order's preparations stay in the
+        queue until served, or until discarded here (e.g. the guest left).
+        Only the preparation changes; its order item and the paid bill are
+        left as they are (no refunds). The reason goes to the audit trail.
+        """
+
+        order, preparation = OrderService._lock_preparation(
+            db,
+            restaurant_id,
+            preparation_id,
+            station_scope=station_scope,
+        )
+
+        # Read under the order lock: only the final payment closes an
+        # order, so a discard cannot overtake a payment in progress.
+        if order.status != "CLOSED":
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.ORDER_NOT_CLOSED,
+                message=(
+                    "Only preparations of a fully paid, closed order can "
+                    "be discarded"
+                ),
+            )
+
+        previous_status = preparation.status
+
+        if not PREPARATION.allows(previous_status, "CANCELLED"):
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.INVALID_PREPARATION_TRANSITION,
+                message=(
+                    f"Invalid preparation transition: "
+                    f"{previous_status} -> CANCELLED"
+                ),
+            )
+
+        PREPARATION.apply(preparation, "CANCELLED")
+        preparation.cancelled_at = datetime.utcnow()
+
+        EventService.record(
+            db=db,
+            restaurant_id=restaurant_id,
+            event_type="preparation.discarded",
+            entity_type="preparation",
+            entity_id=preparation.id,
+            user_id=user_id,
+            metadata={
+                "status": "CANCELLED",
+                "previous_status": previous_status,
+                "reason": reason,
+                "order_item_id": str(preparation.order_item_id),
+                "order_id": str(order.id),
+                "station_id": str(preparation.station_id),
+                "order_created_by": str(order.user_id),
+            },
+        )
+
+        OutboxService.record(
+            db=db,
+            restaurant_id=restaurant_id,
+            payload=preparation_status_changed(
+                preparation_id=preparation.id,
+                order_id=order.id,
+                order_item_id=preparation.order_item_id,
+                station_id=preparation.station_id,
+                previous_status=previous_status,
+                status="CANCELLED",
+            ),
+        )
+
+        commit(db)
+        db.refresh(preparation)
+
+        return preparation
+
+    @staticmethod
+    def ensure_station_visible(
         db: Session,
         restaurant_id: uuid.UUID,
         station_id: uuid.UUID,
         *,
         station_scope: frozenset[uuid.UUID] | None,
-    ) -> list[Preparation]:
-        """The station's open preparations; see update_preparation_status
-        for `station_scope`."""
+    ) -> Station:
+        """The restaurant's station, if `station_scope` includes it.
+
+        Used by the station queue and the station event stream. Raises
+        403 STATION_ACCESS_DENIED or 404 STATION_NOT_FOUND.
+        """
 
         # Checked before looking the station up, so the answer is the same
         # for unassigned, missing and other restaurants' stations.
@@ -1268,8 +1466,59 @@ class OrderService:
                 message="Station not found",
             )
 
-        preparations = (
-            db.query(Preparation)
+        return station
+
+    @staticmethod
+    def get_visible_stations(
+        db: Session,
+        restaurant_id: uuid.UUID,
+        *,
+        station_scope: frozenset[uuid.UUID] | None,
+    ) -> list[Station]:
+        """The restaurant's stations within `station_scope` (None: all of
+        them, inactive ones included), by name."""
+
+        if station_scope is not None and not station_scope:
+            return []
+
+        query = db.query(Station).filter(Station.restaurant_id == restaurant_id)
+
+        if station_scope is not None:
+            query = query.filter(Station.id.in_(station_scope))
+
+        return query.order_by(Station.name.asc(), Station.id.asc()).all()
+
+    @staticmethod
+    def get_station_preparations(
+        db: Session,
+        restaurant_id: uuid.UUID,
+        station_id: uuid.UUID,
+        *,
+        station_scope: frozenset[uuid.UUID] | None,
+    ) -> list[PreparationQueueItem]:
+        """The station's open preparations, oldest first, with what a
+        display shows for each; see update_preparation_status for
+        `station_scope`."""
+
+        OrderService.ensure_station_visible(
+            db,
+            restaurant_id,
+            station_id,
+            station_scope=station_scope,
+        )
+
+        rows = (
+            db.query(
+                Preparation,
+                OrderItem.order_id,
+                OrderItem.quantity,
+                Table.number,
+                Table.name,
+                # Items added before name snapshots show the current name.
+                func.coalesce(OrderItem.product_name_snapshot, Product.name),
+                Order.status,
+                Bill.status,
+            )
             .join(
                 OrderItem,
                 Preparation.order_item_id == OrderItem.id,
@@ -1277,6 +1526,19 @@ class OrderService:
             .join(
                 Order,
                 OrderItem.order_id == Order.id,
+            )
+            .join(
+                Table,
+                Order.table_id == Table.id,
+            )
+            .join(
+                Product,
+                OrderItem.product_id == Product.id,
+            )
+            # At most one bill per order (bills.order_id is unique).
+            .outerjoin(
+                Bill,
+                Bill.order_id == Order.id,
             )
             .filter(
                 Preparation.station_id == station_id,
@@ -1290,9 +1552,62 @@ class OrderService:
                 ),
             )
             .order_by(
-                Preparation.created_at.asc()
+                Preparation.created_at.asc(),
+                Preparation.id.asc(),
             )
             .all()
         )
 
-        return preparations
+        modifiers: dict[uuid.UUID, list[PreparationQueueModifier]] = {}
+
+        if rows:
+            for modifier in (
+                db.query(OrderItemModifier)
+                .filter(
+                    OrderItemModifier.order_item_id.in_(
+                        [preparation.order_item_id for preparation, *_ in rows]
+                    )
+                )
+                # By name: an item's modifiers are stored in no
+                # particular order.
+                .order_by(
+                    OrderItemModifier.name_snapshot.asc(),
+                    OrderItemModifier.id.asc(),
+                )
+            ):
+                modifiers.setdefault(modifier.order_item_id, []).append(
+                    PreparationQueueModifier(
+                        modifier_id=modifier.modifier_id,
+                        name=modifier.name_snapshot,
+                    )
+                )
+
+        return [
+            PreparationQueueItem(
+                id=preparation.id,
+                order_item_id=preparation.order_item_id,
+                station_id=preparation.station_id,
+                status=preparation.status,
+                created_at=preparation.created_at,
+                started_at=preparation.started_at,
+                ready_at=preparation.ready_at,
+                order_id=order_id,
+                table_number=table_number,
+                table_name=table_name,
+                product_name=product_name,
+                quantity=quantity,
+                modifiers=modifiers.get(preparation.order_item_id, []),
+                order_status=order_status,
+                bill_status=bill_status,
+            )
+            for (
+                preparation,
+                order_id,
+                quantity,
+                table_number,
+                table_name,
+                product_name,
+                order_status,
+                bill_status,
+            ) in rows
+        ]

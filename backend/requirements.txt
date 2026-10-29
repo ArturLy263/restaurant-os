@@ -11,3 +11,6 @@ pydantic-settings==2.15.0
 python-jose[cryptography]==3.5.0
 SQLAlchemy==2.0.53
 uvicorn==0.52.4
+# WebSocket protocol for uvicorn (station event streams); without one,
+# uvicorn rejects every WebSocket upgrade.
+wsproto==1.2.0

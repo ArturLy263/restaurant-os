@@ -12,6 +12,12 @@ IDEMPOTENT_OPERATIONS = [
     "/api/v1/orders/{order_id}/void",
     "/api/v1/bills/{bill_id}/payments",
     "/api/v1/bills/{bill_id}/items/{item_id}/cancel",
+    "/api/v1/preparations/{preparation_id}/discard",
+    "/api/v1/orders/{order_id}/items",
+    "/api/v1/bills/order/{order_id}",
+    "/api/v1/preparations/{preparation_id}/start",
+    "/api/v1/preparations/{preparation_id}/ready",
+    "/api/v1/preparations/{preparation_id}/serve",
 ]
 
 VALIDATION_ERROR_CONTENT = {
