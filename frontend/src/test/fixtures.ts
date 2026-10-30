@@ -45,6 +45,7 @@ export function queueItem(overrides: Partial<PreparationQueueItem> = {}): Prepar
     product_name: "Burger",
     quantity: 1,
     modifiers: [],
+    notes: null,
     order_status: "SENT",
     bill_status: null,
     ...overrides,

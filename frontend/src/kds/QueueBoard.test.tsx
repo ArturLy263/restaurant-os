@@ -138,4 +138,11 @@ describe("QueueBoard", () => {
 
     expect((screen.getByRole("button", { name: "Start: 1× Tea" }) as HTMLButtonElement).disabled).toBe(true);
   });
+
+  it("shows the waiter's note on the item", () => {
+    renderBoard({ items: [queueItem({ product_name: "Burger", notes: "allergy: nuts" })] });
+
+    expect(screen.getByText("allergy: nuts")).toBeTruthy();
+    expect(screen.getByText("allergy: nuts").textContent).toBe("Note: allergy: nuts");
+  });
 });

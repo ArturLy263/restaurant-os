@@ -638,3 +638,600 @@ button {
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
+
+.item__notes {
+  margin-top: 0.3rem;
+  padding: 0.25rem 0.5rem;
+  border-left: 4px solid var(--warning);
+  border-radius: 4px;
+  background: rgb(255 181 71 / 12%);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+/* Screen switch (POS / kitchen display) */
+
+.modes {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.modes__button {
+  min-height: 42px;
+  padding: 0 1rem;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.modes__button--current {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+/* Shared POS controls */
+
+.button--small {
+  min-height: 48px;
+  padding: 0 0.9rem;
+  font-size: 0.9rem;
+}
+
+.button--danger {
+  border-color: var(--danger);
+  background: transparent;
+  color: var(--danger);
+}
+
+.button--send {
+  min-height: 64px;
+  font-size: 1.15rem;
+}
+
+.banner--success {
+  border-color: var(--ready);
+  background: rgb(61 220 132 / 12%);
+}
+
+.field__textarea {
+  min-height: auto;
+  padding: 0.6rem 1rem;
+  resize: vertical;
+}
+
+.chip {
+  min-height: 48px;
+  padding: 0 1.1rem;
+  border: 2px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.chip--current {
+  border-color: var(--pending);
+  background: rgb(78 161 255 / 18%);
+}
+
+.chip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.chip__price {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.stepper__button {
+  width: 52px;
+  min-height: 48px;
+  border: none;
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 1.4rem;
+  font-weight: 800;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.stepper__button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.stepper__value {
+  min-width: 3rem;
+  text-align: center;
+  font-size: 1.2rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgb(0 0 0 / 60%);
+}
+
+.dialog {
+  width: min(560px, 100%);
+  max-height: calc(100vh - 2rem);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+}
+
+.dialog__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 0.75rem 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.dialog__title {
+  font-size: 1.35rem;
+}
+
+.dialog__body {
+  display: grid;
+  gap: 1rem;
+  padding: 1.25rem;
+  overflow-y: auto;
+}
+
+.dialog__text {
+  color: var(--text-muted);
+}
+
+.dialog__error {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.dialog__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.options {
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.options__title {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  margin-bottom: 0.5rem;
+  font-weight: 800;
+}
+
+.options__rule {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.options__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+/* POS layout */
+
+.pos {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1rem;
+  min-width: 0;
+}
+
+.tables {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.table-card {
+  width: 100%;
+  min-height: 150px;
+  display: grid;
+  align-content: start;
+  justify-items: start;
+  gap: 0.2rem;
+  padding: 1rem;
+  border: 2px solid var(--border);
+  border-left: 8px solid var(--table-color, var(--border));
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.table-card:hover:not(:disabled) {
+  border-color: var(--pending);
+  border-left-color: var(--table-color, var(--border));
+}
+
+.table-card:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.table-card--free {
+  --table-color: var(--ready);
+}
+
+.table-card--busy {
+  --table-color: var(--in-progress);
+}
+
+.table-card--blocked {
+  --table-color: var(--text-muted);
+}
+
+.table-card__number {
+  font-size: 2rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.table-card__name {
+  font-weight: 700;
+}
+
+.table-card__seats,
+.table-card__detail {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.table-card__status {
+  margin-top: 0.35rem;
+  color: var(--table-color);
+  font-weight: 800;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.table-card .tag {
+  margin: 0.35rem 0 0;
+}
+
+.pos-order {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(320px, 2fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .pos-order {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Menu */
+
+.menu {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.menu__categories {
+  display: flex;
+  gap: 0.5rem;
+  overflow-x: auto;
+  padding-bottom: 0.25rem;
+}
+
+.menu__products {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.product {
+  width: 100%;
+  min-height: 112px;
+  display: grid;
+  align-content: space-between;
+  justify-items: start;
+  gap: 0.35rem;
+  padding: 0.85rem;
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.product:hover:not(:disabled) {
+  border-color: var(--pending);
+}
+
+.product:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.product:disabled {
+  cursor: not-allowed;
+}
+
+.product--unavailable {
+  opacity: 0.45;
+  border-style: dashed;
+}
+
+.product__name {
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.product__price {
+  font-size: 1.1rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.product__meta {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+/* Order */
+
+.order {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+@media (min-width: 901px) {
+  .order {
+    position: sticky;
+    top: 1rem;
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
+  }
+}
+
+.order__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.order__title {
+  font-size: 1.25rem;
+}
+
+.order__meta,
+.order__total-label,
+.order__empty {
+  color: var(--text-muted);
+}
+
+.order__total {
+  display: grid;
+  justify-items: end;
+}
+
+.order__total-value {
+  font-size: 1.5rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.order__section {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.order__section-title {
+  display: flex;
+  justify-content: space-between;
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.order__count {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 600;
+}
+
+.lines {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem 0.75rem;
+  padding: 0.75rem;
+  border-radius: var(--radius);
+  border: 2px solid var(--border);
+  background: var(--surface-raised);
+}
+
+.line--pending {
+  border-color: var(--pending);
+  border-style: dashed;
+}
+
+.line--sent {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+}
+
+.line--cancelled .line__title,
+.line--cancelled .line__price {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+
+.line__title {
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.line__quantity {
+  color: var(--pending);
+  font-variant-numeric: tabular-nums;
+}
+
+.line__modifiers,
+.line__station {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.line__notes {
+  color: var(--warning);
+  font-size: 0.9rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.line__price {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.line__controls,
+.line__note-editor {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.line__note-editor {
+  display: grid;
+}
+
+.prep {
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  color: #0b0e13;
+  background: var(--text-muted);
+}
+
+.prep--pending {
+  background: var(--pending);
+}
+
+.prep--in_progress {
+  background: var(--in-progress);
+}
+
+.prep--ready {
+  background: var(--ready);
+}
+
+.prep--served {
+  background: var(--text);
+}
+
+.prep--cancelled {
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+}
+
+.send {
+  display: grid;
+  gap: 0.4rem;
+  padding-top: 0.25rem;
+}
+
+@media (max-width: 900px) {
+  .send {
+    position: sticky;
+    bottom: 0;
+    padding: 0.75rem 0;
+    background: var(--surface);
+  }
+}
+
+.send__to {
+  color: var(--text-muted);
+  text-align: center;
+  font-weight: 600;
+}
+
+.send__warning {
+  color: var(--danger);
+  font-weight: 700;
+}

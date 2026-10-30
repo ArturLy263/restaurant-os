@@ -136,6 +136,12 @@ function TicketItem({ item, canAct, pending, onAction }: TicketItemProps) {
             ))}
           </ul>
         )}
+        {item.notes && (
+          <p className="item__notes">
+            <span className="visually-hidden">Note: </span>
+            {item.notes}
+          </p>
+        )}
         <p className="item__times">
           <span>Received {formatClock(item.created_at)}</span>
           {item.started_at && <span>Started {formatClock(item.started_at)}</span>}

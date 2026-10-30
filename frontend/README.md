@@ -1,6 +1,9 @@
-# RestaurantOS kitchen display (frontend)
+# RestaurantOS waiter POS and kitchen display (frontend)
 
-Vite + React + TypeScript client for station displays (KDS). It talks to
+Vite + React + TypeScript client for waiters (POS) and station displays
+(KDS). After sign-in the screen follows the user's permissions: waiters get
+the POS, kitchen and bar staff the KDS, and managers can switch between the
+two in the top bar. It talks to
 the FastAPI backend only through `/api`; in development the Vite server
 proxies `/api` (HTTP and WebSocket) to `http://127.0.0.1:8000`, so no CORS
 setup is needed.
@@ -27,7 +30,39 @@ Point the proxy elsewhere with `API_PROXY_TARGET=http://host:port npm run dev`.
 | `npm run preview`   | Serve the production build (also proxies `/api`) |
 | `npm run e2e`       | Browser test in headless Chrome (see below)   |
 
-## How it works
+## Waiter POS
+
+1. **Tables** — `GET /api/v1/tables`, refreshed every 20 s: number, name,
+   seats, status and the open order (not sent / sent counts, another
+   waiter's). A free table asks for the number of guests and opens an
+   order (`POST /api/v1/orders`); a table with an order opens it.
+2. **Order** — `GET /api/v1/menu` and `GET /api/v1/orders/{id}` (the order
+   is refreshed every 15 s, so kitchen progress shows up). Menu on the
+   left (categories, products with price, station and availability),
+   order on the right (stacked on narrow screens).
+3. **Adding** — a product without options is added with one tap; one with
+   modifier groups opens a dialog that enforces the group rules
+   (required, at most N) and takes a quantity and a note. Unsent items are
+   stored on the server right away (status `ADDED`), so the order survives
+   a reload or another device.
+4. **Next round** — unsent items show their destination station; quantity
+   (`PATCH`), note (`PATCH`) and remove (`POST …/cancel`) apply to them
+   only. **Send round** sends them all in one request and reports where
+   they went; items already sent show their station and preparation status.
+5. **No duplicates** — every change carries a new `Idempotency-Key`;
+   buttons are disabled while a request runs. If the connection drops
+   while sending, the outcome is unknown: the next tap on Send reuses the
+   same key, so the server replays the first result instead of sending the
+   round twice.
+6. **Money** — amounts are converted to integer cents before any
+   arithmetic (`src/pos/money.ts`); menu prices arrive as decimal strings,
+   order item prices still as JSON numbers (see
+   `docs/monetary-contract.md`).
+
+Orders opened by another waiter are read-only unless the user may manage
+all orders (managers).
+
+## How the kitchen display works
 
 1. **Sign in** — `POST /api/v1/auth/login`, then `GET /api/v1/me`. The
    access token is kept in `sessionStorage` (survives a reload, not closing
