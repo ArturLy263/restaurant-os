@@ -37,6 +37,19 @@ export class ApiError extends Error {
   get isConflict(): boolean {
     return this.status === 409;
   }
+
+  /** The request may or may not have reached the server. */
+  get isNetworkError(): boolean {
+    return this.code === NETWORK_ERROR;
+  }
+}
+
+/** A new Idempotency-Key for one user action. */
+export function newIdempotencyKey(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 }
 
 export function isApiError(error: unknown): error is ApiError {
@@ -101,10 +114,13 @@ async function toApiError(response: Response): Promise<ApiError> {
 }
 
 export interface RequestOptions {
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "PATCH";
   body?: unknown;
   token?: string | null;
   signal?: AbortSignal;
+  // Sent as the Idempotency-Key header: a retry with the same key replays
+  // the first result instead of repeating the change.
+  idempotencyKey?: string;
 }
 
 /**
@@ -122,6 +138,9 @@ export async function apiRequest<T>(
   }
   if (options.token) {
     headers.Authorization = `Bearer ${options.token}`;
+  }
+  if (options.idempotencyKey) {
+    headers["Idempotency-Key"] = options.idempotencyKey;
   }
 
   let response: Response;

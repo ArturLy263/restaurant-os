@@ -240,6 +240,7 @@ class OrderService:
         product_id: uuid.UUID,
         quantity: int,
         modifier_ids: list[uuid.UUID] | None = None,
+        notes: str | None = None,
         *,
         can_modify_any_order: bool = False,
     ) -> OrderItem:
@@ -311,6 +312,20 @@ class OrderService:
                 status_code=status.HTTP_409_CONFLICT,
                 code=ErrorCode.PRODUCT_INACTIVE,
                 message="Product is not active",
+            )
+
+        # A deactivated category takes its products off the menu.
+        category_is_active = (
+            db.query(Category.is_active)
+            .filter(Category.id == product.category_id)
+            .scalar()
+        )
+
+        if not category_is_active:
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.PRODUCT_INACTIVE,
+                message="Product is not available: its category is inactive",
             )
 
         selected_modifiers: list[Modifier] = []
@@ -421,6 +436,7 @@ class OrderService:
             quantity=quantity,
             unit_price=base_price,
             total_price=total_price,
+            notes=notes,
             status="ADDED",
         )
 
@@ -444,6 +460,7 @@ class OrderService:
             "quantity": quantity,
             "unit_price": str(base_price),
             "total_price": str(total_price),
+            "notes": notes,
             "modifiers": [
                 {
                     "modifier_id": str(modifier.id),
@@ -539,8 +556,9 @@ class OrderService:
                 message="Order has no items",
             )
 
-        sent_item_ids: list[str] = []
-        sent: list[tuple[OrderItem, Preparation]] = []
+        # Every item of the round is checked before anything changes, so
+        # a round is sent completely or not at all.
+        routed: list[tuple[OrderItem, Station]] = []
 
         for item in items:
 
@@ -603,6 +621,12 @@ class OrderService:
                     message=f"Station {station.name} is inactive",
                 )
 
+            routed.append((item, station))
+
+        sent_item_ids: list[str] = []
+        sent: list[tuple[OrderItem, Preparation]] = []
+
+        for item, station in routed:
             ORDER_ITEM.apply(item, "SENT")
             item.sent_at = datetime.utcnow()
 
@@ -688,6 +712,138 @@ class OrderService:
 
         return order
 
+    @staticmethod
+    def update_order_item(
+        db: Session,
+        restaurant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        order_id: uuid.UUID,
+        item_id: uuid.UUID,
+        *,
+        quantity: int | None = None,
+        notes: str | None = None,
+        update_notes: bool = False,
+        can_modify_any_order: bool = False,
+    ) -> OrderItem:
+        """Change the quantity and/or note of an item not sent yet.
+
+        Sent items are with the kitchen or bar: they are cancelled, never
+        edited. Once a bill exists its items are charged, and changing one
+        would be a bill adjustment, so billed orders are refused as in
+        cancel_order_item. `notes` is applied only if `update_notes`.
+        """
+
+        # Lock the order so the change cannot race a send or a bill.
+        order = OrderRepository(db).get_for_restaurant(
+            order_id,
+            restaurant_id,
+            for_update=True,
+        )
+
+        if not order:
+            raise ApiError(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code=ErrorCode.ORDER_NOT_FOUND,
+                message="Order not found",
+            )
+
+        OrderService._ensure_can_modify(order, user_id, can_modify_any_order)
+
+        OrderService._ensure_order_accepts_items(order)
+
+        if BillRepository(db).get_for_order(order.id) is not None:
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.ORDER_BILLED,
+                message="Order has a bill; its items can no longer be changed",
+            )
+
+        if quantity is not None and quantity <= 0:
+            raise ApiError(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code=ErrorCode.INVALID_QUANTITY,
+                message="Quantity must be greater than zero",
+            )
+
+        # Re-read the item under the order lock: a concurrent send may
+        # have changed its status.
+        item = (
+            db.query(OrderItem)
+            .filter(
+                OrderItem.id == item_id,
+                OrderItem.order_id == order.id,
+            )
+            .populate_existing()
+            .first()
+        )
+
+        if not item:
+            raise ApiError(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code=ErrorCode.ORDER_ITEM_NOT_FOUND,
+                message="Order item not found",
+            )
+
+        if item.status == "CANCELLED":
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.ORDER_ITEM_ALREADY_CANCELLED,
+                message="Order item is already cancelled",
+            )
+
+        if item.status != "ADDED":
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.ORDER_ITEM_ALREADY_SENT,
+                message="Order item has already been sent",
+            )
+
+        before = {
+            "quantity": item.quantity,
+            "total_price": str(item.total_price),
+            "notes": item.notes,
+        }
+
+        if quantity is not None:
+            # The same prices as when the item was added: the product
+            # price and modifier prices stored on the item.
+            modifier_total = sum(
+                (modifier.price_snapshot for modifier in item.modifiers),
+                Decimal("0.00"),
+            )
+            item.quantity = quantity
+            item.total_price = (item.unit_price + modifier_total) * quantity
+
+        if update_notes:
+            item.notes = notes
+
+        after = {
+            "quantity": item.quantity,
+            "total_price": str(item.total_price),
+            "notes": item.notes,
+        }
+
+        # An unchanged request is not an event.
+        if after != before:
+            EventService.record(
+                db=db,
+                restaurant_id=restaurant_id,
+                event_type="item.updated",
+                entity_type="order_item",
+                entity_id=item.id,
+                user_id=user_id,
+                metadata={
+                    "order_id": str(order.id),
+                    "order_created_by": str(order.user_id),
+                    "before": before,
+                    "after": after,
+                },
+            )
+
+        commit(db)
+        db.refresh(item)
+
+        return item
 
     @staticmethod
     def cancel_order_item(
@@ -1512,6 +1668,7 @@ class OrderService:
                 Preparation,
                 OrderItem.order_id,
                 OrderItem.quantity,
+                OrderItem.notes,
                 Table.number,
                 Table.name,
                 # Items added before name snapshots show the current name.
@@ -1597,6 +1754,7 @@ class OrderService:
                 product_name=product_name,
                 quantity=quantity,
                 modifiers=modifiers.get(preparation.order_item_id, []),
+                notes=notes,
                 order_status=order_status,
                 bill_status=bill_status,
             )
@@ -1604,6 +1762,7 @@ class OrderService:
                 preparation,
                 order_id,
                 quantity,
+                notes,
                 table_number,
                 table_name,
                 product_name,

@@ -133,6 +133,12 @@ class OrderItem(Base):
         nullable=True,
     )
 
+    # The waiter's note for the kitchen or bar; NULL when there is none.
+    notes: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+
     status: Mapped[str] = mapped_column(
         String(30),
         default="ADDED",
@@ -170,3 +176,8 @@ class OrderItem(Base):
         Numeric(10, 2),
         nullable=False,
     )
+    @property
+    def preparation(self) -> "Preparation | None":
+        """The item's preparation once sent (there is at most one)."""
+
+        return self.preparations[0] if self.preparations else None

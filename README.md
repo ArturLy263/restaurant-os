@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ArturLy263/restaurant-os/actions/workflows/ci.yml/badge.svg)](https://github.com/ArturLy263/restaurant-os/actions/workflows/ci.yml)
 
-Backend for restaurant order, kitchen and billing workflows, plus a kitchen display (KDS) frontend,
+Backend for restaurant order, kitchen and billing workflows, plus a waiter POS and a kitchen display (KDS) frontend,
 designed from my experience working in restaurant kitchens. It is a portfolio project, not a
 production system.
 
@@ -25,14 +25,17 @@ production system.
   kitchen and bar displays.
 - **Tenant consistency:** database triggers keep each restaurant's records apart; central status
   rules backed by CHECK constraints.
+- **Waiter POS** ([`frontend/`](frontend/README.md)): tables with their open orders, menu with
+  availability and modifiers, an order builder (quantities, notes, removing unsent items) and rounds
+  sent to the right kitchen or bar station, idempotently.
 - **Kitchen display** ([`frontend/`](frontend/README.md), React + TypeScript + Vite): sign-in, station
   queue, start / ready / serve, live updates with reconnect; unit and component tests (Vitest) and a
   headless-Chrome test against a mock API.
 - **CI** (GitHub Actions): backend unit, integration and migration suites against a PostgreSQL 16
   service; frontend type check, tests and production build.
 
-Not built yet: APIs for menu, table, user and role management; printers; inventory; analytics;
-deployment.
+Not built yet: APIs for menu, table, user and role management (menu and tables are read-only);
+cashier and manager screens; printers; inventory; analytics; deployment.
 
 ```mermaid
 flowchart LR
@@ -214,6 +217,8 @@ monetary value (`"12.50"`). Today:
 - Bill and payment amounts follow it: `subtotal`, `total`,
   `adjustments_total`, `adjusted_total`, `paid_total`, `amount_due`,
   adjustment `amount` and payment `amount` are strings such as `"15.00"`.
+- Menu prices (`GET /api/v1/menu`: product `price`, modifier
+  `price_adjustment`) follow it from the start.
 - Order item `unit_price` and `total_price` and item modifier `price`
   are still JSON numbers (`12.5`). They are exact (stored as
   `NUMERIC(10, 2)`), but clients should not do arithmetic on them as
@@ -391,6 +396,7 @@ a kitchen or bar display shows:
       {"modifier_id": "1d8a…", "name": "Bacon"},
       {"modifier_id": "77b0…", "name": "Cheese"}
     ],
+    "notes": "no onions",
     "order_status": "SENT",
     "bill_status": null
   }
@@ -404,8 +410,44 @@ ordered. Items added before that migration have no stored name and show
 the product's current name; they are not backfilled. Order responses
 expose the stored name as `items[].product_name` (`null` for those older
 items). `table_name` may be `null`. Prices are not
-included. `order_status` is the order's status and `bill_status` its
+included. `notes` is the waiter's note for the item (`null` when there is
+none). `order_status` is the order's status and `bill_status` its
 bill's (`null` before the order is billed).
+
+#### Waiter POS endpoints
+
+What the waiter screen reads and changes, on top of the order endpoints
+(create order, add item, send, cancel item, get order):
+
+- `GET /api/v1/tables` (`orders:view`): the restaurant's active tables by
+  number, each with `status` and `active_order` (`null`, or `id`,
+  `status`, `user_id`, `guest_count`, `created_at`, `unsent_items`,
+  `sent_items`). A table should have at most one active order; if older
+  data holds several, the newest is shown.
+- `GET /api/v1/menu` (`orders:view`): `currency` and the active
+  categories in display order, each with all its products: `price`
+  (decimal string), `station` (`null` if none), `is_available` and
+  `unavailable_reason` (`PRODUCT_INACTIVE`, `PRODUCT_HAS_NO_STATION`,
+  `STATION_INACTIVE`: the error adding or sending it would give), and its
+  modifier groups with their rules and active modifiers. Products of
+  inactive categories are not listed and cannot be added
+  (409 `PRODUCT_INACTIVE`).
+- Items take an optional `notes` (up to 500 characters; trimmed; empty
+  means none) when added, shown on the station queue.
+- `PATCH /api/v1/orders/{order_id}/items/{item_id}`
+  (`orders:add_items`, idempotent): `{"quantity": 3}` and/or
+  `{"notes": "…"}` (`null` removes the note) for an item not sent yet.
+  The total is recalculated from the prices stored on the item. Sent or
+  cancelled items get 409 (`ORDER_ITEM_ALREADY_SENT`,
+  `ORDER_ITEM_ALREADY_CANCELLED`), billed orders 409 `ORDER_BILLED`; the
+  creator rule applies as for adding. Records an `item.updated` audit
+  event with the values before and after.
+- Order item responses also carry `notes` and `preparation` (`null`
+  until sent; then `id`, `station_id`, `station_name`, `status`), so the
+  waiter sees where each item went and how far it is.
+- Sending a round checks every item before changing anything: if one
+  cannot be routed (no station, inactive station, inactive product),
+  nothing is sent.
 
 #### Payment is not service
 

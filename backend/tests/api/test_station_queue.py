@@ -15,6 +15,7 @@ from tests.factories import auth_headers, create_restaurant, create_station
 
 QUEUE_FIELDS = {
     "id",
+    "notes",
     "order_item_id",
     "station_id",
     "status",
@@ -125,6 +126,7 @@ def test_queue_shows_what_to_prepare(pos, db_session, restaurant, extras):
     assert coke["product_name"] == "Coca-Cola"
     assert coke["quantity"] == 1
     assert coke["modifiers"] == []
+    assert burger["notes"] is None and coke["notes"] is None
 
 
 def test_table_without_a_name(pos, restaurant):

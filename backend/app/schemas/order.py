@@ -1,7 +1,23 @@
 import uuid
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field, field_validator
+
+
+def _blank_to_none(value):
+    if isinstance(value, str):
+        value = value.strip()
+        return value or None
+    return value
+
+
+# A waiter's note for the kitchen or bar; surrounding whitespace is
+# removed and an empty note means none.
+ItemNotes = Annotated[
+    Annotated[str, Field(max_length=500)] | None,
+    BeforeValidator(_blank_to_none),
+]
 
 
 class CreateOrderRequest(BaseModel):
@@ -23,6 +39,32 @@ class AddOrderItemRequest(BaseModel):
     product_id: uuid.UUID
     quantity: int = Field(gt=0)
     modifier_ids: list[uuid.UUID] = Field(default_factory=list)
+    notes: ItemNotes = None
+
+
+class UpdateOrderItemRequest(BaseModel):
+    """Changes to an item not sent yet. Omitted fields stay unchanged;
+    `notes: null` (or an empty note) removes the note."""
+
+    quantity: int | None = Field(default=None, gt=0)
+    notes: ItemNotes = None
+
+
+class OrderItemPreparationResponse(BaseModel):
+    id: uuid.UUID
+    station_id: uuid.UUID
+    # The station's current name.
+    station_name: str
+    status: str
+
+    @classmethod
+    def from_preparation(cls, preparation):
+        return cls(
+            id=preparation.id,
+            station_id=preparation.station_id,
+            station_name=preparation.station.name,
+            status=preparation.status,
+        )
 
 
 class OrderItemModifierResponse(BaseModel):
@@ -47,6 +89,16 @@ class OrderItemResponse(BaseModel):
     created_at: datetime
     cancelled_at: datetime | None = None
     modifiers: list[OrderItemModifierResponse] = []
+    notes: str | None = None
+    # Where and how far the item is being prepared; null until sent.
+    preparation: OrderItemPreparationResponse | None = None
+
+    @field_validator("preparation", mode="before")
+    @classmethod
+    def _preparation(cls, value):
+        if value is None or isinstance(value, (dict, OrderItemPreparationResponse)):
+            return value
+        return OrderItemPreparationResponse.from_preparation(value)
 
 
 class OrderDetailResponse(BaseModel):

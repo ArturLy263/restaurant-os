@@ -19,6 +19,7 @@ from app.schemas.order import (
     OrderItemResponse,
     OrderResponse,
     CancelOrderItemRequest,
+    UpdateOrderItemRequest,
     VoidOrderRequest,
 )
 from app.services.order_service import OrderService
@@ -82,6 +83,7 @@ def add_order_item(
             product_id=request.product_id,
             quantity=request.quantity,
             modifier_ids=request.modifier_ids,
+            notes=request.notes,
             can_modify_any_order=(
                 Permission.ORDERS_MANAGE_ALL in auth.permissions
             ),
@@ -133,6 +135,42 @@ def get_order(
     )
 
     return order
+@router.patch(
+    "/{order_id}/items/{item_id}",
+    response_model=OrderItemResponse,
+    responses=IDEMPOTENT_ROUTE_RESPONSES,
+)
+def update_order_item(
+    order_id: uuid.UUID,
+    item_id: uuid.UUID,
+    request: UpdateOrderItemRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_permission(Permission.ORDERS_ADD_ITEMS)
+    ),
+    auth: AuthContext = Depends(get_auth_context),
+    idempotency: Idempotency = Depends(),
+):
+    """Change the quantity or note of an item that was not sent yet."""
+
+    return idempotency.run(
+        lambda: OrderService.update_order_item(
+            db=db,
+            restaurant_id=current_user.restaurant_id,
+            user_id=current_user.id,
+            order_id=order_id,
+            item_id=item_id,
+            quantity=request.quantity,
+            notes=request.notes,
+            update_notes="notes" in request.model_fields_set,
+            can_modify_any_order=(
+                Permission.ORDERS_MANAGE_ALL in auth.permissions
+            ),
+        ),
+        payload=request,
+    )
+
+
 @router.post(
     "/{order_id}/items/{item_id}/cancel",
     response_model=OrderItemResponse,
