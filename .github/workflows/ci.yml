@@ -96,3 +96,34 @@ jobs:
             echo "::error::Some tests are not marked unit, integration or migrations (exit code $status)"
             exit 1
           fi
+
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          # package.json engines: ^20.19.0 || >=22.12.0
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies (exactly the lockfile)
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Unit and component tests (no browser)
+        run: npm test
+
+      - name: Production build
+        run: npm run build
