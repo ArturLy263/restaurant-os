@@ -35,6 +35,8 @@ class PreparationQueueItem(BaseModel):
     product_name: str
     quantity: int
     modifiers: list[PreparationQueueModifier]
+    # The waiter's note for the station; null when there is none.
+    notes: str | None
     # The order's status and its bill's (null before billing). A CLOSED
     # order is fully paid; its open preparations stay in the queue until
     # served or discarded, since payment is not service.

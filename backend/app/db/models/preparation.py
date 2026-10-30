@@ -10,6 +10,7 @@ from app.db.database import Base
 
 if TYPE_CHECKING:
     from app.db.models.order import OrderItem
+    from app.db.models.station import Station
 
 
 class Preparation(Base):
@@ -72,3 +73,5 @@ class Preparation(Base):
     order_item: Mapped["OrderItem"] = relationship(
         back_populates="preparations",
     )
+
+    station: Mapped["Station"] = relationship()

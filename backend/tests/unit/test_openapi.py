@@ -56,3 +56,26 @@ def test_validation_error_schema_matches_other_routes(schema):
     assert {"HTTPValidationError", "ValidationError"} <= set(
         schema["components"]["schemas"]
     )
+
+
+def test_item_update_documents_its_idempotency_key(schema):
+    operation = schema["paths"]["/api/v1/orders/{order_id}/items/{item_id}"]["patch"]
+
+    assert operation["responses"]["422"]["content"] == VALIDATION_ERROR_CONTENT
+    assert {
+        parameter["name"]
+        for parameter in operation["parameters"]
+        if parameter["in"] == "header"
+    } == {"Idempotency-Key"}
+
+
+def test_menu_prices_are_documented_as_decimal_strings(schema):
+    components = schema["components"]["schemas"]
+
+    for model, field in (
+        ("MenuProductResponse", "price"),
+        ("MenuModifierResponse", "price_adjustment"),
+    ):
+        documented = components[model]["properties"][field]
+        assert documented["type"] == "string"
+        assert documented["pattern"] == r"^-?\d{1,8}\.\d{2}$"
