@@ -6,7 +6,8 @@ the code, so every requirement was checked against the current code,
 migrations, tests and CI rather than assumed missing.
 
 Audited base: `349e2b5`. Work commits: `fca32c4`, `c03de04`, `ba166c8`,
-`9718495`, and the CI/docs commit that adds this file. Nothing is pushed.
+`9718495`, `319eafa` (CI job and this report) and the documentation
+commit recording the owner decisions of 2026-10-30. Nothing is pushed.
 
 ## Completion matrix
 
@@ -25,25 +26,40 @@ Audited base: `349e2b5`. Work commits: `fca32c4`, `c03de04`, `ba166c8`,
 | **C2** Tenant and station scope | PASS | `OrderService.ensure_station_visible`, station scope in `AuthContext`; triggers `e1b7d3a9c4f2`; `tests/api/test_station_scope.py`, `test_tenant_consistency.py`, cross-tenant 404 tests |
 | **C3** `/me` | PASS | `GET /api/v1/me`: id, name, email, restaurant_id, role, permissions, stations |
 | **C4** Persistent idempotency with response replay | PASS — completed in `ba166c8` | table `idempotency_keys` (migration `b7c3e9a41d2f`), key + change + response in one transaction; now on all 12 POS/KDS writes (added: add item, create bill, start/ready/serve); `tests/api/test_idempotency.py` (31 tests), `tests/integration/test_mutation_concurrency.py` |
-| **C5** Reused key with a different payload is deterministic | **PARTIAL — decision needed** | deterministic rejection exists (`test_same_key_with_different_payload_is_rejected`), but with **422** `IDEMPOTENCY_KEY_REUSED`, while the roadmap says **409**. See below. |
+| **C5** Reused key with a different payload is deterministic | PASS — resolved by owner decision 2026-10-30 | **422** `IDEMPOTENCY_KEY_REUSED`, every time, nothing run (`app/api/idempotency.py`; `test_same_key_with_different_payload_is_rejected`). The roadmap's 409 was amended to 422; see "C5 decision". |
 | **D1** Transactional outbox | PASS | `outbox_events` (migration `f3a9c1e7b5d2`); written in the business transaction; `tests/integration/test_outbox_atomicity.py` |
 | **D2** Delivery worker, retries, dedup, failures | PASS | `app/workers/outbox_worker.py` (`SKIP LOCKED`, backoff, dead letters, publish timeout, per-order ordering, retention); `tests/integration/test_outbox_worker.py`, `test_outbox_delivery_policies.py`; clients deduplicate on event id |
 | **D3** Versioned event contracts | PASS | `app/schemas/outbox.py` registry, golden payloads in `tests/unit/test_event_contracts.py` |
 | **D4** Authenticated, tenant/station-scoped WebSocket after commit | PASS | `app/realtime/` (first-message auth, re-authorization, close codes); `tests/integration/test_station_event_stream.py`, `test_station_event_fanout.py`; real API → PostgreSQL → outbox → WebSocket → Chrome delivery shown on the isolated `restaurantos_e2e` database |
 
-## Decision needed: C5 status code
+## C5 decision (2026-10-30)
 
-`app/api/idempotency.py`, the OpenAPI docs and the README define a reused
-key with a different request as **422** `IDEMPOTENCY_KEY_REUSED`, following
-the IETF Idempotency-Key draft (which uses 409 for a request still in
-progress). The roadmap asks for **409**. It was not changed because it is a
-published contract.
+The owner kept **422 Unprocessable Content** `IDEMPOTENCY_KEY_REUSED` for
+an existing `Idempotency-Key` reused with a different request. This is
+intentional and is not to be changed to 409: in this API 409 means the
+current state forbids the operation, while a reused key is an invalid
+request that no retry can fix (this also follows the IETF
+Idempotency-Key draft, which keeps 409 for a request still in progress).
 
-- **Keep 422** (recommended): amend the roadmap; no code change.
-- **Switch to 409**: a few lines in `idempotency.py`, the OpenAPI response
-  table, README and tests. No client sends idempotency keys yet (the KDS
-  does not), so nothing breaks today; after Stage 2 clients exist it would
-  be a breaking change.
+Recorded in: the October 12 roadmap (kept outside this repository; its C5
+readiness criterion now reads 422, with a dated note), the README "Idempotency keys" section, `app/api/idempotency.py`
+(module docstring and the OpenAPI 422 response description, unchanged)
+and `tests/api/test_idempotency.py` (asserts 422 and the code). No code
+change.
+
+## Monetary values (owner decision 2026-10-30)
+
+Target contract: decimal strings for every monetary value (`"12.50"`).
+Audit result (`docs/monetary-contract.md`): storage is `Numeric(10, 2)`
+and `Decimal` everywhere; bill, adjustment and payment amounts already
+are decimal strings; **three response fields are JSON numbers**:
+`OrderItemResponse.unit_price`, `OrderItemResponse.total_price` and
+`OrderItemModifierResponse.price` (in add item, cancel item, get/send/void
+order); the payment request also accepts JSON numbers. Changing them is
+a breaking contract change, so it is a **Stage 2 contract requirement**,
+done together with the Waiter POS client; current behaviour is kept and
+documented in the README. Not a Stage 1.5 blocker: no existing client
+reads these fields.
 
 ## Fixes and commits
 
@@ -69,30 +85,31 @@ optional header on five routes. Frontend behaviour is unchanged.
 
 ## Before sign-off
 
-1. Decide C5 (above).
+1. ~~Decide C5~~ — done 2026-10-30 (422 kept).
 2. Push when ready and confirm the first GitHub Actions run (both jobs)
    is green; `gh` is not installed locally, so no remote run has been
    observed for these commits.
-3. Upgrade the development database when convenient:
-   `alembic upgrade head` (adds the status CHECK constraints and one
-   nullable column, changes no rows; all existing statuses already fit).
-   Until then, the current code cannot read `order_items` from
-   `restaurant_os`. The same applies to `restaurantos_e2e` if it is reused.
+3. ~~Upgrade the development database~~ — done: `restaurant_os` is at
+   head `a3d9e7c1f5b2` and `alembic check` reports no differences
+   (verified 2026-10-30). `restaurantos_e2e` is still at `e1b7d3a9c4f2`;
+   upgrade it only if it is reused (it is a disposable test database).
 
 ## Verdict
 
-All P0 requirements are implemented and verified except **C5**, whose
-behaviour is deterministic but uses 422 instead of the roadmap's 409.
-Stage 1.5 is **ready for sign-off once that decision is recorded** (either
-answer is a small, contained step) and the first remote CI run is green.
-No architectural, destructive or data-rewriting change is outstanding.
+All P0 requirements, including C5 (422 by owner decision), are
+implemented and verified locally. Stage 1.5 is **complete pending the
+first remote CI run**, which needs the push. No architectural,
+destructive or data-rewriting change is outstanding. Monetary
+decimal strings for order item prices are a Stage 2 contract
+requirement, not a Stage 1.5 gap.
 
 ## Stage 2 sequence (proposal)
 
 The API has no read endpoints for the menu (categories, products,
 modifiers), tables or a table's orders, and no management endpoints;
-those come first. Before the POS is built, decide whether order-item
-prices stay JSON numbers (bill amounts are decimal strings).
+those come first. The POS work starts with the monetary contract change
+in `docs/monetary-contract.md` (order item and modifier prices become
+decimal strings, payment requests strings only).
 
 1. **Waiter POS**: read endpoints for tables (with their active order),
    menu (categories, products, modifier groups) and open orders; a waiter

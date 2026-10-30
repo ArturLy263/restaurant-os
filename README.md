@@ -159,6 +159,26 @@ credentials, 403 when the user's role lacks the permission
 missing resources and for other restaurants' resources, 409 when the
 current state forbids the operation.
 
+### Money values
+
+The target contract is a decimal string with two decimals for every
+monetary value (`"12.50"`). Today:
+
+- Bill and payment amounts follow it: `subtotal`, `total`,
+  `adjustments_total`, `adjusted_total`, `paid_total`, `amount_due`,
+  adjustment `amount` and payment `amount` are strings such as `"15.00"`.
+- Order item `unit_price` and `total_price` and item modifier `price`
+  are still JSON numbers (`12.5`). They are exact (stored as
+  `NUMERIC(10, 2)`), but clients should not do arithmetic on them as
+  floats; bill amounts are the source of truth for totals. They become
+  strings in Stage 2, together with the first client that shows prices.
+- The payment request `amount` should be sent as a string (`"15.00"`);
+  JSON numbers are still accepted, and more than two decimals is rejected
+  with 422.
+
+Field-by-field inventory and the transition plan:
+`docs/monetary-contract.md`.
+
 ### Roles and permissions
 
 Every endpoint except `POST /api/v1/auth/login`, `GET /health` and
@@ -430,7 +450,10 @@ curl -X POST http://127.0.0.1:8000/api/v1/bills/$BILL_ID/payments \
   the same method, endpoint, path parameters and body; JSON key order and
   amount formatting (`15`, `"15.0"`, `"15.00"`) do not matter.
 - **Same key, different request:** 422 `IDEMPOTENCY_KEY_REUSED`, every
-  time, and nothing is run.
+  time, and nothing is run. This status is a deliberate contract (owner
+  decision 2026-10-30), not 409: 409 in this API means the current state
+  forbids the operation, while a reused key is an invalid request that a
+  retry can never fix.
 - **Concurrent requests with the same key:** the second waits until the
   first finishes, then gets its stored result. The operation runs once.
 - **When the operation fails:** only successful (2xx) results are stored.

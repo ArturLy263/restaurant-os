@@ -7,8 +7,8 @@ reset or written by this work; migrations are validated only by the test
 suite (disposable databases and `restaurant_os_test`).
 
 Last updated: 2026-10-30. **State: audit and implementation complete;
-waiting on the owner's C5 decision and the first remote CI run.** The full
-report is `docs/stage-1-5-completion.md`.
+C5 resolved by the owner (422 kept); waiting only on the first remote CI
+run.** The full report is `docs/stage-1-5-completion.md`.
 
 ## Requirement status
 
@@ -21,7 +21,7 @@ report is `docs/stage-1-5-completion.md`.
 | B5 | DONE `9718495` (core contract tests) |
 | C1–C3 | PASS |
 | C4 | DONE `ba166c8` (keys on add item, create bill, start/ready/serve) |
-| C5 | DECISION NEEDED: 422 `IDEMPOTENCY_KEY_REUSED` vs roadmap 409 |
+| C5 | PASS: 422 `IDEMPOTENCY_KEY_REUSED` kept by owner decision 2026-10-30; roadmap amended |
 | D1–D4 | PASS |
 
 ## Checks run (final)
@@ -44,15 +44,17 @@ report is `docs/stage-1-5-completion.md`.
 - `c03de04` feat: keep the product name on order items
 - `ba166c8` feat: accept idempotency keys when adding items, billing and preparing
 - `9718495` test: pin the contracts of the core POS operations
-- next commit: CI frontend job, `docs/` (this file, completion report,
-  deployment proposal)
+- `319eafa` ci: test the frontend; docs: Stage 1.5 completion report
+- next commit: docs only — C5 decision, monetary contract audit
+  (`docs/monetary-contract.md`), README money section
 
 ## Next actions
 
-1. Owner: decide C5 (keep 422 and amend the roadmap, or switch to 409).
-2. Owner: push and confirm both GitHub Actions jobs are green.
-3. Owner: `alembic upgrade head` on `restaurant_os` before using the dev
-   API again (additive; the current code needs the new column).
-4. Then Stage 2, starting with the Waiter POS read endpoints.
+1. Owner: push and confirm both GitHub Actions jobs are green.
+2. Then Stage 2, starting with the monetary contract change
+   (`docs/monetary-contract.md`) and the Waiter POS read endpoints.
+
+Done: C5 decided (422); `restaurant_os` upgraded to head `a3d9e7c1f5b2`
+by the owner (`alembic check` clean, verified 2026-10-30).
 
 No tests are running and nothing is blocked on the agent side.
