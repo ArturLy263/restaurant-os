@@ -49,8 +49,10 @@ test database; "OpenAPI" is what `app.openapi()` publishes.
 | 8 | `OrderDetailResponse.items[]` (fields 6, 7, 9) | response | `GET /orders/{id}`, `POST /orders/{id}/send`, `POST /orders/{id}/void` | — | — | — | **no** (through 6, 7, 9) |
 | 9 | `OrderItemModifierResponse.price` (alias of `price_snapshot`) | response | inside 6 and 8 | `float` | number | `1.0` | **no** |
 
-Not in the API: `products.price` and `modifiers.price_adjustment` (there
-are no menu endpoints yet; Stage 2 adds them).
+Since Stage 2.1, `products.price` and `modifiers.price_adjustment` are
+exposed by `GET /api/v1/menu` as decimal strings (`Money`). The frontend
+(`frontend/src/pos/money.ts`) converts every amount, string or number, to
+integer cents before arithmetic.
 
 Other places that carry money:
 
@@ -60,7 +62,7 @@ Other places that carry money:
 | Outbox / WebSocket event contracts (`app/schemas/outbox.py`) | no money fields by design | n/a |
 | Stored idempotent responses (`idempotency_keys.response_body`) | copy of the response as it was serialized, replayed unchanged for 24 h | follows 1–9 |
 | Station queue (`GET /stations/{id}/preparations`) | no money fields | n/a |
-| Frontend (`frontend/src/api/types.ts`) | no money fields (the KDS shows no prices) | n/a |
+| Frontend (`frontend/src/api/types.ts`) | `Money = string \| number`; the POS converts to integer cents (`src/pos/money.ts`), never float arithmetic | ready for the switch |
 
 ## Inconsistencies
 
@@ -102,7 +104,7 @@ that consumes it, its types and its tests.
 | 2 | 6, 7, 9 | `float` → `Money` | update the three tests above to expect strings; `test_core_contracts.py` asserts `"12.50"`/`"25.00"` and type `string` |
 | 3 | 1–4 | `Decimal` → `Money` (format already right; makes the two-decimal promise explicit in OpenAPI) | contract test asserts every monetary field in every response schema is a `Money` string (one introspection test over `app.openapi()`) |
 | 4 | 5 | accept strings only (`Money` with `strict` input); a JSON number gets 422 | test number → 422 `VALIDATION_ERROR`, string → 201; README curl already sends a string |
-| 5 | new menu endpoints | `products.price`, `modifiers.price_adjustment` exposed as `Money` from the start | covered by step 3's introspection test |
+| 5 | new menu endpoints | done in Stage 2.1: `GET /api/v1/menu` exposes `price` and `price_adjustment` as `Money` (`app/schemas/money.py`, two-decimal strings) | `tests/unit/test_money.py`, `tests/unit/test_openapi.py`, `tests/api/test_waiter_pos.py` |
 | 6 | frontend | `type Money = string` in `frontend/src/api/types.ts`; display without float arithmetic (format the string; sums come from the API) | Vitest for formatting |
 | 7 | docs | README "Money values" section → describe the final contract; this file marked done | — |
 
