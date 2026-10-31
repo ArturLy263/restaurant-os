@@ -21,6 +21,8 @@ export function TablesView({ token, user, onOpenOrder }: TablesViewProps) {
   const { handleAuthError } = useAuth();
   const [tables, setTables] = useState<Load<DiningTable[]>>({ status: "loading" });
   const [refreshing, setRefreshing] = useState(false);
+  // Why the list shown could not be refreshed; null once it is current.
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [choosing, setChoosing] = useState<DiningTable | null>(null);
   const canOpen = user.permissions.includes(Permission.OrdersCreate);
 
@@ -30,8 +32,10 @@ export function TablesView({ token, user, onOpenOrder }: TablesViewProps) {
       try {
         const data = await getTables(token, signal);
         setTables({ status: "loaded", data });
+        setRefreshError(null);
       } catch (error) {
         if (signal?.aborted || handleAuthError(error)) return;
+        setRefreshError(error instanceof Error ? error.message : "Unknown error");
         // Keep a list already shown; only a first load fails the view.
         setTables((current) => (current.status === "loaded" ? current : { status: "error", error: error as Error }));
       } finally {
@@ -74,6 +78,12 @@ export function TablesView({ token, user, onOpenOrder }: TablesViewProps) {
           {refreshing ? "Refreshing…" : "Refresh"}
         </button>
       </div>
+
+      {refreshError && (
+        <div className="banner banner--error" role="alert">
+          <span>The tables could not be refreshed, so they may be out of date: {refreshError}</span>
+        </div>
+      )}
 
       {tables.data.length === 0 ? (
         <section className="state">

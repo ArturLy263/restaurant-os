@@ -714,3 +714,28 @@ def test_station_assignment_is_unchanged_for_items_already_sent(floor):
 
     assert item["id"] == burger["id"]
     assert item["preparation"]["station_name"] == "Kitchen"
+
+
+def test_order_lists_items_in_the_order_they_were_added(floor):
+    """Changing or sending an item rewrites its row; the order screen's
+    lines must not move around because of it."""
+
+    order_id = open_order(floor)
+    burger = add_burger(floor, order_id)
+    beer = add(floor, order_id, floor.beer).json()
+    burger_two = add(floor, order_id, floor.burger, 1, [floor.bacon, floor.medium, floor.cheese]).json()
+    assert patch(floor, item_path(order_id, burger["id"]), {"quantity": 2}).status_code == 200
+    assert patch(floor, item_path(order_id, beer["id"]), {"notes": "cold"}).status_code == 200
+    added = [burger["id"], beer["id"], burger_two["id"]]
+
+    before = get(floor, f"/api/v1/orders/{order_id}").json()["items"]
+    sent = send(floor, order_id).json()["items"]
+    more = add(floor, order_id, floor.beer).json()
+    floor.db.expire_all()
+    after = get(floor, f"/api/v1/orders/{order_id}").json()["items"]
+
+    assert [item["id"] for item in before] == added
+    assert [item["id"] for item in sent] == added
+    assert [item["id"] for item in after] == [*added, more["id"]]
+    # Modifiers by name, as on the station queue.
+    assert [m["name"] for m in after[2]["modifiers"]] == ["Bacon", "Cheese", "Medium"]

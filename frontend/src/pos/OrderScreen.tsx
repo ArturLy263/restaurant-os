@@ -40,6 +40,8 @@ export function OrderScreen({ token, user, open, onLeave }: OrderScreenProps) {
   const [menu, setMenu] = useState<Load<Menu>>({ status: "loading" });
   const [order, setOrder] = useState<Load<OrderDetail>>({ status: "loading" });
   const [notice, setNotice] = useState<Notice | null>(null);
+  // Why the order shown could not be reloaded; null once it is current.
+  const [stale, setStale] = useState<string | null>(null);
   const [busyProducts, setBusyProducts] = useState<ReadonlySet<string>>(new Set());
   const [busyItems, setBusyItems] = useState<ReadonlySet<string>>(new Set());
   const [sending, setSending] = useState(false);
@@ -48,19 +50,28 @@ export function OrderScreen({ token, user, open, onLeave }: OrderScreenProps) {
   // tapping Send again reuses it, so the round cannot go out twice.
   const sendKey = useRef<string | null>(null);
   const busy = useRef(0);
+  // The products, items and send being worked on right now. Checked
+  // synchronously: taps that arrive before the next render (which disables
+  // their buttons) would otherwise each start the change again.
+  const inFlight = useRef(new Set<string>());
 
+  // Resolves to the order as loaded, or null if it could not be loaded.
   const reloadOrder = useCallback(
-    async (signal?: AbortSignal) => {
+    async (signal?: AbortSignal): Promise<OrderDetail | null> => {
       try {
         const data = await getOrder(token, open.orderId, signal);
         setOrder({ status: "loaded", data });
+        setStale(null);
+        return data;
       } catch (error) {
-        if (signal?.aborted || handleAuthError(error)) return;
+        if (signal?.aborted || handleAuthError(error)) return null;
+        setStale(messageOf(error));
         setOrder((current) =>
           current.status === "loaded" && !(isApiError(error) && error.status === 404)
             ? current
             : { status: "error", error: error as Error },
         );
+        return null;
       }
     },
     [token, open.orderId, handleAuthError],
@@ -112,6 +123,13 @@ export function OrderScreen({ token, user, open, onLeave }: OrderScreenProps) {
     await reloadOrder();
   }
 
+  /** Marks `key` as in flight; false if it already is. */
+  function claim(key: string): boolean {
+    if (inFlight.current.has(key)) return false;
+    inFlight.current.add(key);
+    return true;
+  }
+
   function track(setter: typeof setBusyItems, id: string, on: boolean) {
     setter((current) => {
       const next = new Set(current);
@@ -122,6 +140,8 @@ export function OrderScreen({ token, user, open, onLeave }: OrderScreenProps) {
   }
 
   async function addProduct(product: MenuProduct, choice: ProductChoice) {
+    const key = `product:${product.id}`;
+    if (!claim(key)) return;
     track(setBusyProducts, product.id, true);
     await change(
       () =>
@@ -139,16 +159,21 @@ export function OrderScreen({ token, user, open, onLeave }: OrderScreenProps) {
       `Added ${choice.quantity}× ${product.name}`,
       `${product.name} was not added`,
     );
+    inFlight.current.delete(key);
     track(setBusyProducts, product.id, false);
   }
 
   async function changeItem(item: OrderItem, run: () => Promise<unknown>, failure: string) {
+    const key = `item:${item.id}`;
+    if (!claim(key)) return;
     track(setBusyItems, item.id, true);
     await change(run, null, failure);
+    inFlight.current.delete(key);
     track(setBusyItems, item.id, false);
   }
 
   async function send(current: OrderDetail) {
+    if (!claim("send")) return;
     const { pending } = orderSections(current);
     const { stations } = roundDestinations(pending, products);
     sendKey.current ??= newIdempotencyKey();
@@ -165,18 +190,24 @@ export function OrderScreen({ token, user, open, onLeave }: OrderScreenProps) {
       });
     } catch (error) {
       if (handleAuthError(error)) return;
-      if (isApiError(error) && error.isNetworkError) {
+      const unknown = isApiError(error) && error.isNetworkError;
+      if (!unknown) sendKey.current = null;
+      const reloaded = await reloadOrder();
+      if (unknown && reloaded && wasSent(reloaded, pending)) {
+        // Only the answer was lost: the order shows the round as sent.
+        sendKey.current = null;
+        setNotice({ kind: "success", text: `Round sent: ${describeDestinations(stations)}.` });
+      } else if (unknown) {
         setNotice({
           kind: "error",
           text: "The connection dropped while sending, so it is unknown whether the round went out. Tap Send again: it will not be sent twice.",
         });
       } else {
-        sendKey.current = null;
         setNotice({ kind: "error", text: `The round was not sent: ${messageOf(error)}` });
       }
-      await reloadOrder();
     } finally {
       busy.current -= 1;
+      inFlight.current.delete("send");
       setSending(false);
     }
   }
@@ -222,6 +253,11 @@ export function OrderScreen({ token, user, open, onLeave }: OrderScreenProps) {
           </button>
         </div>
       )}
+      {stale && (
+        <div className="banner banner--info" role="status">
+          <span>The order could not be reloaded, so it may be out of date (also the kitchen and bar progress): {stale}</span>
+        </div>
+      )}
       <div className="pos-order">
         <MenuPanel
           menu={menu.data}
@@ -262,6 +298,12 @@ export function OrderScreen({ token, user, open, onLeave }: OrderScreenProps) {
       </div>
     </main>
   );
+}
+
+/** None of `round`'s items is waiting to be sent in `order` any more. */
+function wasSent(order: OrderDetail, round: OrderItem[]): boolean {
+  const ids = new Set(round.map((item) => item.id));
+  return order.items.every((item) => !ids.has(item.id) || item.status !== "ADDED");
 }
 
 /** Why this user cannot change the order here, or null. */

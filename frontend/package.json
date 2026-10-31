@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit -p .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "node e2e/kds.e2e.mjs"
+    "e2e": "node e2e/kds.e2e.mjs",
+    "e2e:pos": "node e2e/pos.e2e.mjs"
   },
   "dependencies": {
     "react": "^19.3.1",

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { AuthProvider } from "../auth/AuthContext";
@@ -93,6 +93,26 @@ describe("Tables", () => {
     expect(await screen.findByRole("button", { name: /Table 1: Order sent/ })).toBeTruthy();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.getAllByText("Other waiter")).toHaveLength(1);
+  });
+
+  it("says when the tables could not be refreshed, and keeps the list", async () => {
+    mockApi({
+      "GET /api/v1/tables": [
+        jsonResponse(TABLES),
+        () => {
+          throw new TypeError("Failed to fetch");
+        },
+        jsonResponse(TABLES),
+      ],
+    });
+
+    renderPos();
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("could not be refreshed");
+    expect(screen.getByRole("button", { name: /Table 1:/ })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
   it("reopens a table's active order with what was sent and its progress", async () => {
@@ -210,6 +230,60 @@ describe("Order builder", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("adds a product once however fast it is tapped", async () => {
+    const { calls } = mockApi({
+      "GET /api/v1/tables": [jsonResponse(TABLES)],
+      [ORDER]: [jsonResponse(order([])), jsonResponse(order([orderItem()]))],
+      "GET /api/v1/menu": [jsonResponse(MENU)],
+      [ITEMS]: [jsonResponse(orderItem(), 201)],
+    });
+
+    renderPos();
+    await openTableTwo();
+    fireEvent.click(screen.getByRole("tab", { name: "Drinks" }));
+    const beer = screen.getByRole("button", { name: /^Beer,/ });
+    // Taps within one turn of the event loop: React has not re-rendered
+    // (and disabled the button) in between.
+    act(() => {
+      beer.click();
+      beer.click();
+      beer.click();
+    });
+
+    expect(await screen.findByRole("listitem", { name: "1× Beer, not sent" })).toBeTruthy();
+    expect(calls.filter((call) => call.key === ITEMS)).toHaveLength(1);
+  });
+
+  it("changes or removes an item once however fast it is tapped", async () => {
+    const beer = orderItem({ quantity: 2, total_price: 8 });
+    const { calls } = mockApi({
+      "GET /api/v1/tables": [jsonResponse(TABLES)],
+      [ORDER]: [jsonResponse(order([beer]))],
+      "GET /api/v1/menu": [jsonResponse(MENU)],
+      [`PATCH /api/v1/orders/${ORDER_ID}/items/${beer.id}`]: [jsonResponse({ ...beer, quantity: 3 })],
+      [`POST /api/v1/orders/${ORDER_ID}/items/${beer.id}/cancel`]: [jsonResponse({ ...beer, status: "CANCELLED" })],
+    });
+
+    renderPos();
+    const panel = await openTableTwo();
+    const line = within(panel).getByRole("listitem", { name: "2× Beer, not sent" });
+    const more = within(line).getByRole("button", { name: "More quantity of beer" });
+    act(() => {
+      more.click();
+      more.click();
+    });
+    await waitFor(() => expect(within(line).getByRole("button", { name: "Remove Beer" }).hasAttribute("disabled")).toBe(false));
+    const remove = within(line).getByRole("button", { name: "Remove Beer" });
+    act(() => {
+      remove.click();
+      remove.click();
+    });
+    await waitFor(() => expect(calls.some((call) => call.key.endsWith("/cancel"))).toBe(true));
+
+    expect(calls.filter((call) => call.key.startsWith("PATCH"))).toHaveLength(1);
+    expect(calls.filter((call) => call.key.endsWith("/cancel"))).toHaveLength(1);
+  });
+
   it("changes quantities, edits notes and removes unsent items", async () => {
     const beer = orderItem({ quantity: 2, total_price: 8 });
     const { calls } = mockApi({
@@ -239,6 +313,32 @@ describe("Order builder", () => {
     const cancel = calls.find((call) => call.key.endsWith("/cancel"))!;
     expect(body(cancel.init)).toEqual({ reason: "Removed before sending" });
     expect(header(cancel.init, "Idempotency-Key")).toBeTruthy();
+  });
+
+  it("says when the order shown may be out of date", async () => {
+    const beer = orderItem();
+    mockApi({
+      "GET /api/v1/tables": [jsonResponse(TABLES)],
+      [ORDER]: [
+        jsonResponse(order([beer])),
+        () => {
+          throw new TypeError("Failed to fetch");
+        },
+        jsonResponse(order([beer])),
+      ],
+      "GET /api/v1/menu": [jsonResponse(MENU)],
+      [`POST /api/v1/orders/${ORDER_ID}/items/${beer.id}/cancel`]: [errorResponse(502, "HTTP_502", "Bad gateway")],
+    });
+
+    renderPos();
+    const panel = await openTableTwo();
+    // A failed change reloads the order, which fails too.
+    fireEvent.click(within(panel).getByRole("button", { name: "Remove Beer" }));
+
+    expect(await screen.findByText(/may be out of date/)).toBeTruthy();
+    expect(within(panel).getByRole("listitem", { name: "1× Beer, not sent" })).toBeTruthy();
+    fireEvent.click(await within(panel).findByRole("button", { name: "Remove Beer" }));
+    await waitFor(() => expect(screen.queryByText(/may be out of date/)).toBeNull());
   });
 
   it("keeps an order opened by another waiter read-only", async () => {
@@ -289,6 +389,26 @@ describe("Sending a round", () => {
     expect(within(panel).getAllByText("Waiting")).toHaveLength(2);
   });
 
+  it("sends the round once however fast Send is tapped", async () => {
+    const beer = orderItem();
+    const { calls } = mockApi({
+      "GET /api/v1/tables": [jsonResponse(TABLES)],
+      [ORDER]: [jsonResponse(order([beer]))],
+      "GET /api/v1/menu": [jsonResponse(MENU)],
+      [SEND]: [jsonResponse(order([sentItem({ ...beer, status: "SENT" })]))],
+    });
+
+    renderPos();
+    const panel = await openTableTwo();
+    const button = within(panel).getByRole("button", { name: /Send round/ });
+    act(() => {
+      for (let i = 0; i < 5; i++) button.click();
+    });
+
+    expect((await screen.findByRole("status")).textContent).toContain("Round sent: 1 to Bar.");
+    expect(calls.filter((call) => call.key === SEND)).toHaveLength(1);
+  });
+
   it("retries a send with an unknown outcome under the same key", async () => {
     const beer = orderItem();
     const { calls } = mockApi({
@@ -314,6 +434,29 @@ describe("Sending a round", () => {
     const keys = calls.filter((call) => call.key === SEND).map((call) => header(call.init, "Idempotency-Key"));
     expect(keys).toHaveLength(2);
     expect(keys[0]).toBe(keys[1]);
+  });
+
+  it("reports a round whose answer was lost as sent once the order shows it", async () => {
+    const beer = orderItem();
+    const { calls } = mockApi({
+      "GET /api/v1/tables": [jsonResponse(TABLES)],
+      [ORDER]: [jsonResponse(order([beer])), jsonResponse(order([sentItem({ ...beer, status: "SENT" })]))],
+      "GET /api/v1/menu": [jsonResponse(MENU)],
+      [SEND]: [
+        () => {
+          throw new TypeError("Failed to fetch");
+        },
+      ],
+    });
+
+    renderPos();
+    const panel = await openTableTwo();
+    fireEvent.click(within(panel).getByRole("button", { name: /Send round/ }));
+
+    expect((await screen.findByRole("status")).textContent).toContain("Round sent: 1 to Bar.");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(within(panel).queryByRole("button", { name: /Send round/ })).toBeNull();
+    expect(calls.filter((call) => call.key === SEND)).toHaveLength(1);
   });
 
   it("shows why a round was refused and keeps the items", async () => {
