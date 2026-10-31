@@ -1235,3 +1235,34 @@ button {
   color: var(--danger);
   font-weight: 700;
 }
+
+/* Phones: the top bar keeps its actions on one row (the user's name is
+   shortened) instead of stacking each one, and tables fit two per row. */
+@media (max-width: 600px) {
+  .topbar {
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+  }
+
+  .topbar__actions {
+    width: 100%;
+    flex-wrap: nowrap;
+    gap: 0.5rem;
+  }
+
+  .topbar__user {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tables {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+
+  .table-card {
+    min-height: 0;
+  }
+}
