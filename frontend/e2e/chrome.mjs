@@ -68,8 +68,11 @@ export async function launchChrome(executable) {
   const pending = new Map();
   const problems = [];
   const frames = [];
+  // method -> handlers of that protocol event (see `on`).
+  const handlers = new Map();
   socket.onmessage = (message) => {
     const data = JSON.parse(message.data);
+    if (data.method) for (const handler of handlers.get(data.method) ?? []) handler(data.params);
     if (data.id !== undefined) {
       const call = pending.get(data.id);
       pending.delete(data.id);
@@ -105,6 +108,12 @@ export async function launchChrome(executable) {
   return {
     send,
     evaluate,
+    /** Calls `handler(params)` for every `method` event; returns an unsubscribe. */
+    on(method, handler) {
+      if (!handlers.has(method)) handlers.set(method, new Set());
+      handlers.get(method).add(handler);
+      return () => handlers.get(method).delete(handler);
+    },
     problems,
     frames,
     async close() {

@@ -29,6 +29,7 @@ Point the proxy elsewhere with `API_PROXY_TARGET=http://host:port npm run dev`.
 | `npm run build`     | Type check, then production build in `dist/`  |
 | `npm run preview`   | Serve the production build (also proxies `/api`) |
 | `npm run e2e`       | Browser test in headless Chrome (see below)   |
+| `npm run e2e:pos`   | Real-stack POS + KDS acceptance (see below)   |
 
 ## Waiter POS
 
@@ -50,10 +51,14 @@ Point the proxy elsewhere with `API_PROXY_TARGET=http://host:port npm run dev`.
    only. **Send round** sends them all in one request and reports where
    they went; items already sent show their station and preparation status.
 5. **No duplicates** — every change carries a new `Idempotency-Key`;
-   buttons are disabled while a request runs. If the connection drops
-   while sending, the outcome is unknown: the next tap on Send reuses the
-   same key, so the server replays the first result instead of sending the
-   round twice.
+   buttons are disabled while a request runs, and taps on a product, an
+   item or Send that arrive before the screen re-renders are ignored. If
+   the connection drops while sending, the order is reloaded: if it shows
+   the round as sent, the round is reported as sent; otherwise the outcome
+   is unknown and the next tap on Send reuses the same key, so the server
+   replays the first result instead of sending the round twice.
+   When the tables or the order cannot be reloaded, the screen keeps what
+   it shows and says that it may be out of date until a reload succeeds.
 6. **Money** — amounts are converted to integer cents before any
    arithmetic (`src/pos/money.ts`); menu prices arrive as decimal strings,
    order item prices still as JSON numbers (see
@@ -124,6 +129,27 @@ all orders (managers).
    when `/me` lacks the permission (`preparations:update` or
    `preparations:serve`); the backend still checks every request. A 409
    (changed or cancelled elsewhere) shows a notice and refetches.
+
+## Real-stack acceptance test
+
+`npm run e2e:pos` (`e2e/pos.e2e.mjs`) runs the Waiter POS and the Kitchen
+and Bar displays together, in four headless Chrome instances (waiter,
+cook, barman, a second waiter), against the Vite dev server, a FastAPI
+process it starts with `OUTBOX_WEBSOCKET_DELIVERY=true`, and PostgreSQL.
+It never uses the development or test database:
+`scripts/pos_e2e/database.py` creates a disposable database (random name
+and comment token, as in the migration tests) on the `.env` server,
+migrates and seeds it, and drops it when the run ends.
+
+It covers a first order (modifiers, a note, quantity changes, removal,
+routing to Kitchen and Bar, prices against PostgreSQL), a second round,
+preparation progress shown to the waiter, rapid taps, a lost response to
+a send (with and without a failed reload), a round refused as a whole,
+the API stopping and restarting (displays reconnect), redelivered outbox
+events, tenant isolation and access rules, and the layout at 375, 768,
+1024, 1440 and 1920 px. Needs Docker's PostgreSQL, the backend virtualenv
+(`../.venv`, or `PYTHON`) and Chrome; screenshots and `layout.json` go to
+a temporary directory (or `ARTIFACTS`). Takes about two minutes.
 
 ## Browser test
 

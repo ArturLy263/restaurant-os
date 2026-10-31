@@ -444,7 +444,10 @@ What the waiter screen reads and changes, on top of the order endpoints
   event with the values before and after.
 - Order item responses also carry `notes` and `preparation` (`null`
   until sent; then `id`, `station_id`, `station_name`, `status`), so the
-  waiter sees where each item went and how far it is.
+  waiter sees where each item went and how far it is. An order's `items`
+  are listed in the order they were added (`created_at`, then `id`), and
+  each item's `modifiers` by name, so lines do not move when an item is
+  changed or sent.
 - Sending a round checks every item before changing anything: if one
   cannot be routed (no station, inactive station, inactive product),
   nothing is sent.
@@ -1108,8 +1111,8 @@ without a database, a negative check that a missing test database fails
 the run, the integration tests and the migration tests, all with
 `REQUIRE_TEST_DATABASE=1`. A separate `frontend` job (Node 22) installs
 exactly the lockfile (`npm ci`), type-checks, runs the Vitest suite and
-builds the production bundle; the headless-Chrome test (`npm run e2e`) is
-run locally only. CI uses only throwaway credentials for the job-local
+builds the production bundle; the headless-Chrome tests (`npm run e2e`,
+and the real-stack `npm run e2e:pos`) are run locally only. CI uses only throwaway credentials for the job-local
 database and needs no secrets.
 
 ## Updating dependencies
