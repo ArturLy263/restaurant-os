@@ -79,9 +79,13 @@ class Order(Base):
         DateTime,
     )
 
+    # In the order they were added. Without an ORDER BY, PostgreSQL
+    # returns rows in storage order, which changes whenever an item is
+    # updated (a quantity change, a send).
     items: Mapped[list["OrderItem"]] = relationship(
         back_populates="order",
         cascade="all, delete-orphan",
+        order_by="(OrderItem.created_at, OrderItem.id)",
     )
 
     bill: Mapped["Bill | None"] = relationship(
@@ -163,9 +167,12 @@ class OrderItem(Base):
         cascade="all, delete-orphan",
     )
 
+    # By name, as on the station queue: modifiers are stored in no
+    # particular order.
     modifiers: Mapped[list["OrderItemModifier"]] = relationship(
         back_populates="order_item",
         cascade="all, delete-orphan",
+        order_by="(OrderItemModifier.name_snapshot, OrderItemModifier.id)",
     )
 
     order: Mapped["Order"] = relationship(
