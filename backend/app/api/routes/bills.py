@@ -1,7 +1,7 @@
 import uuid
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.api.idempotency import IDEMPOTENT_ROUTE_RESPONSES, Idempotency
@@ -10,19 +10,17 @@ from app.core.permissions import Permission
 from app.db.dependencies import get_db
 from app.db.models.user import User
 from app.schemas.bill import (
-    CreateBillResponse,
-    PaymentRequest,
-    PaymentResponse,
-)
-from app.schemas.order import CancelOrderItemRequest
-from app.services.bill_service import BillService
-from app.services.order_service import OrderService
-from app.schemas.bill import (
+    BillDetailResponse,
     BillResponse,
     CreateBillResponse,
-    PaymentRequest,
-    PaymentResponse,
+    CreatePaymentRequest,
+    EqualSplitResponse,
+    PaymentDetailResponse,
 )
+from app.schemas.order import CancelOrderItemRequest
+from app.services import cashier_views
+from app.services.bill_service import MAX_SPLIT_PARTS, BillService
+from app.services.order_service import OrderService
 
 
 router = APIRouter(
@@ -57,19 +55,23 @@ def create_bill(
 
 @router.post(
     "/{bill_id}/payments",
-    response_model=PaymentResponse,
+    response_model=PaymentDetailResponse,
     status_code=status.HTTP_201_CREATED,
     responses=IDEMPOTENT_ROUTE_RESPONSES,
 )
 def create_payment(
     bill_id: uuid.UUID,
-    request: PaymentRequest,
+    request: CreatePaymentRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(
         require_permission(Permission.PAYMENTS_CREATE)
     ),
     idempotency: Idempotency = Depends(),
 ):
+    """Take a payment (CASH, or CARD confirmed by the cashier after the
+    external terminal approved it) in the open cash shift of the open
+    business day, with an optional tip and optionally for given items."""
+
     return idempotency.run(
         lambda: BillService.create_payment(
             db=db,
@@ -78,13 +80,18 @@ def create_payment(
             bill_id=bill_id,
             amount=request.amount,
             method=request.method,
+            tip_amount=request.tip_amount,
+            order_item_ids=request.order_item_ids,
+            external_reference=request.external_reference,
+            card_confirmed=request.card_confirmed,
         ),
         payload=request,
     )
 
+
 @router.get(
     "/{bill_id}",
-    response_model=BillResponse,
+    response_model=BillDetailResponse,
 )
 def get_bill(
     bill_id: uuid.UUID,
@@ -93,11 +100,26 @@ def get_bill(
         require_permission(Permission.BILLS_VIEW)
     ),
 ):
-    return BillService.get_bill(
-        db=db,
-        restaurant_id=current_user.restaurant_id,
-        bill_id=bill_id,
-    )
+    return cashier_views.bill_detail(db, current_user.restaurant_id, bill_id)
+
+
+@router.get(
+    "/{bill_id}/split",
+    response_model=EqualSplitResponse,
+)
+def split_bill_equally(
+    bill_id: uuid.UUID,
+    parts: int = Query(ge=2, le=MAX_SPLIT_PARTS),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_permission(Permission.BILLS_VIEW)
+    ),
+):
+    """The amount due split into `parts` equal shares to the cent."""
+
+    bill = BillService.get_bill(db, current_user.restaurant_id, bill_id)
+    shares = BillService.equal_split(db, current_user.restaurant_id, bill_id, parts)
+    return {"bill_id": bill.id, "amount_due": bill.amount_due, "shares": shares}
 
 
 @router.post(

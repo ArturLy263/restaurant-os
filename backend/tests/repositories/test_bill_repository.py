@@ -54,9 +54,12 @@ def test_reloads_bill_and_payments_already_in_session(db_session, restaurant):
     )
     db_session.execute(
         text(
-            "INSERT INTO payments (id, bill_id, amount, method, status, "
-            "created_at) VALUES (:id, :bill_id, 15.00, 'CASH', "
-            "'COMPLETED', now())"
+            "INSERT INTO payments (id, restaurant_id, bill_id, amount, currency, method, status, "
+            "user_id, cash_shift_id, business_day_id, confirmation_method, confirmed_at, created_at) "
+            "SELECT :id, s.restaurant_id, :bill_id, 15.00, s.currency, 'CASH', 'COMPLETED', "
+            "s.opened_by_user_id, s.id, s.business_day_id, 'CASH_RECEIVED', now(), now() "
+            "FROM cash_shifts s JOIN bills b ON b.id = :bill_id JOIN orders o ON o.id = b.order_id "
+            "WHERE s.status = 'OPEN' AND s.restaurant_id = o.restaurant_id"
         ),
         {"id": uuid.uuid4(), "bill_id": bill.id},
     )

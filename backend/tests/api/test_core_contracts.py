@@ -31,7 +31,9 @@ CORE_OPERATIONS = {
     ("post", "/api/v1/orders/{order_id}/send"): ("200", "OrderDetailResponse", None),
     ("post", "/api/v1/preparations/{preparation_id}/ready"): ("200", "PreparationResponse", None),
     ("post", "/api/v1/bills/order/{order_id}"): ("201", "CreateBillResponse", None),
-    ("post", "/api/v1/bills/{bill_id}/payments"): ("201", "PaymentResponse", "PaymentRequest"),
+    # Stage 3: the request gained tip, items, terminal reference and card
+    # confirmation; the response only gained fields.
+    ("post", "/api/v1/bills/{bill_id}/payments"): ("201", "PaymentDetailResponse", "CreatePaymentRequest"),
 }
 
 JSON_TYPES = {
@@ -192,7 +194,7 @@ def test_core_flow_matches_the_published_contracts(pos, openapi):
         openapi,
         pos.client.post(
             f"/api/v1/bills/{bill['id']}/payments",
-            json={"amount": "15.00", "method": "CARD"},
+            json={"amount": "15.00", "method": "CARD", "card_confirmed": True},
             headers=pos.headers,
         ),
         "post",

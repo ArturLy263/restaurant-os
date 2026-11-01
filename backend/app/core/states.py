@@ -9,8 +9,9 @@ therefore fails the request (a 500, rolled back) instead of storing an
 impossible state.
 
 The database enforces each vocabulary with a CHECK constraint (migration
-f4c2a8d6b1e3), and tests keep these tables, those constraints, the model
-defaults and the preparation event contracts in step.
+f4c2a8d6b1e3; business_days and cash_shifts in d9e4b2a7c6f1), and tests keep these
+tables, those constraints, the model defaults and the preparation event
+contracts in step.
 """
 
 from dataclasses import dataclass
@@ -110,6 +111,25 @@ TABLE = StateMachine(
     }),
 )
 
+# The restaurant's trading day; independent of cash shifts, of which it
+# has any number. A closed day is never reopened.
+BUSINESS_DAY = StateMachine(
+    name="business day",
+    initial="OPEN",
+    transitions=frozenset({
+        ("OPEN", "CLOSED"),
+    }),
+)
+
+# A cash register's working period; reopening is a new shift.
+CASH_SHIFT = StateMachine(
+    name="cash shift",
+    initial="OPEN",
+    transitions=frozenset({
+        ("OPEN", "CLOSED"),
+    }),
+)
+
 # Records written once in their only status.
 PAYMENT = StateMachine(name="payment", initial="COMPLETED", transitions=frozenset())
 BILL_ADJUSTMENT = StateMachine(name="bill adjustment", initial="APPLIED", transitions=frozenset())
@@ -123,6 +143,8 @@ BY_TABLE: dict[str, StateMachine] = {
     "tables": TABLE,
     "payments": PAYMENT,
     "bill_adjustments": BILL_ADJUSTMENT,
+    "business_days": BUSINESS_DAY,
+    "cash_shifts": CASH_SHIFT,
 }
 
 

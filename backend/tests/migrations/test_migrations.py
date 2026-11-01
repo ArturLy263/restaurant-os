@@ -454,6 +454,8 @@ def test_tenant_consistency_triggers_keep_and_report_existing_rows(
 
 
 STATUS_TABLES = ("orders", "order_items", "preparations", "bills", "tables", "payments", "bill_adjustments")
+# Added with the cashier module (d9e4b2a7c6f1).
+LATER_STATUS_TABLES = ("business_days", "cash_shifts")
 
 
 def status_checks(database):
@@ -468,14 +470,15 @@ def status_checks(database):
 
 
 def test_status_checks_match_the_state_rules(migration_database):
-    """f4c2a8d6b1e3 allows exactly the statuses of app.core.states."""
+    """f4c2a8d6b1e3 and later migrations allow exactly the statuses of
+    app.core.states."""
 
     from app.core.states import BY_TABLE
 
     migrate(migration_database, command.upgrade, "head")
     checks = status_checks(migration_database)
 
-    assert set(checks) == set(BY_TABLE) == set(STATUS_TABLES)
+    assert set(checks) == set(BY_TABLE) == set(STATUS_TABLES) | set(LATER_STATUS_TABLES)
     for table, machine in BY_TABLE.items():
         name, definition = checks[table]
         assert name == f"ck_{table}_status"
@@ -614,3 +617,164 @@ def test_order_item_notes_migration_keeps_existing_items(migration_database):
         columns = {column["name"] for column in inspect(connection).get_columns("order_items")}
         assert "notes" not in columns
         assert connection.scalar(text("SELECT count(*) FROM order_items")) == 1
+
+
+def _legacy_paid_order(connection, method="CARD"):
+    """One restaurant with a paid bill and a payment as written before
+    the cashier module, plus its payment.completed audit event."""
+
+    for statement in (
+        "INSERT INTO restaurants (id, name, timezone, currency, is_active, created_at, updated_at) "
+        "VALUES ('11111111-1111-4111-8111-111111111111', 'R', 'UTC', 'EUR', true, now(), now())",
+        "INSERT INTO roles (id, restaurant_id, name, created_at) "
+        "VALUES ('33333333-3333-4333-8333-333333333333', '11111111-1111-4111-8111-111111111111', 'CASHIER', now())",
+        "INSERT INTO users (id, restaurant_id, role_id, name, email, password_hash, is_active, created_at, updated_at) "
+        "VALUES ('44444444-4444-4444-8444-444444444444', '11111111-1111-4111-8111-111111111111', "
+        "'33333333-3333-4333-8333-333333333333', 'U', 'u@example.com', 'x', true, now(), now())",
+        "INSERT INTO tables (id, restaurant_id, number, capacity, status, is_active, created_at, updated_at) "
+        "VALUES ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111', 1, 2, 'AVAILABLE', true, now(), now())",
+        "INSERT INTO orders (id, restaurant_id, table_id, user_id, guest_count, status, created_at, updated_at) "
+        "VALUES ('77777777-7777-4777-8777-777777777777', '11111111-1111-4111-8111-111111111111', "
+        "'22222222-2222-4222-8222-222222222222', '44444444-4444-4444-8444-444444444444', 1, 'CLOSED', now(), now())",
+        "INSERT INTO bills (id, order_id, subtotal, total, status, created_at) "
+        "VALUES ('99999999-9999-4999-8999-999999999999', '77777777-7777-4777-8777-777777777777', 4.00, 4.00, 'PAID', now())",
+        "INSERT INTO payments (id, bill_id, amount, method, status, created_at) "
+        "VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '99999999-9999-4999-8999-999999999999', 4.00, "
+        f"'{method}', 'COMPLETED', now())",
+        "INSERT INTO operational_events (id, restaurant_id, user_id, event_type, entity_type, entity_id, created_at) "
+        "VALUES ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '11111111-1111-4111-8111-111111111111', "
+        "'44444444-4444-4444-8444-444444444444', 'payment.completed', 'payment', "
+        "'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', now())",
+    ):
+        connection.execute(text(statement))
+
+
+def test_cashier_migration_keeps_and_completes_existing_payments(migration_database):
+    """d9e4b2a7c6f1 keeps existing payments, fills in their restaurant,
+    currency and user, and exempts them (only them) from the new-row
+    check; the downgrade keeps the payments."""
+
+    migrate(migration_database, command.upgrade, "c7e1a5b9d3f8")
+    with migration_database.begin() as connection:
+        _legacy_paid_order(connection)
+
+    migrate(migration_database, command.upgrade, "d9e4b2a7c6f1")
+    with migration_database.begin() as connection:
+        assert connection.execute(
+            text(
+                "SELECT restaurant_id::text, currency, user_id::text, tip_amount, "
+                "cash_shift_id, confirmation_method FROM payments"
+            )
+        ).one() == (
+            "11111111-1111-4111-8111-111111111111",
+            "EUR",
+            "44444444-4444-4444-8444-444444444444",
+            0,
+            None,
+            None,
+        )
+        # A new payment without a shift is refused.
+        with pytest.raises(IntegrityError, match="ck_payments_recorded_in_shift"), connection.begin_nested():
+            connection.execute(
+                text(
+                    "INSERT INTO payments (id, restaurant_id, bill_id, amount, currency, method, status, created_at) "
+                    "VALUES ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', '11111111-1111-4111-8111-111111111111', "
+                    "'99999999-9999-4999-8999-999999999999', 1.00, 'EUR', 'CASH', 'COMPLETED', now())"
+                )
+            )
+
+    migrate(migration_database, command.downgrade, "c7e1a5b9d3f8")
+    with migration_database.begin() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("payments")}
+        assert "tip_amount" not in columns and "cash_shift_id" not in columns
+        assert connection.scalar(text("SELECT count(*) FROM payments")) == 1
+
+
+def test_cashier_migration_refuses_unknown_payment_methods(migration_database):
+    """d9e4b2a7c6f1 stops before changing anything when a payment has a
+    method other than CASH or CARD."""
+
+    migrate(migration_database, command.upgrade, "c7e1a5b9d3f8")
+    with migration_database.begin() as connection:
+        _legacy_paid_order(connection, method="VOUCHER")
+
+    with pytest.raises(RuntimeError, match="VOUCHER"):
+        migrate(migration_database, command.upgrade, "d9e4b2a7c6f1")
+    assert current_revision(migration_database) == "c7e1a5b9d3f8"
+    with migration_database.begin() as connection:
+        assert "cash_shifts" not in inspect(connection).get_table_names()
+
+
+def test_cashier_schema_protects_handovers_days_and_closed_periods(migration_database):
+    """d9e4b2a7c6f1's constraints and triggers, at the database level:
+    handover arithmetic and reasons, a payment's day is its shift's day,
+    closed days and shifts and the ledgers can't be changed."""
+
+    migrate(migration_database, command.upgrade, "c7e1a5b9d3f8")
+    with migration_database.begin() as connection:
+        _legacy_paid_order(connection)
+    migrate(migration_database, command.upgrade, "head")
+    R, U, D1, D2, REG = (
+        "11111111-1111-4111-8111-111111111111",
+        "44444444-4444-4444-8444-444444444444",
+        "d1d1d1d1-0000-4000-8000-000000000001",
+        "d2d2d2d2-0000-4000-8000-000000000002",
+        "eeeeeeee-0000-4000-8000-00000000000e",
+    )
+    S1, S2 = "51515151-0000-4000-8000-000000000001", "52525252-0000-4000-8000-000000000002"
+    with migration_database.begin() as connection:
+        for statement in (
+            f"INSERT INTO business_days (id, restaurant_id, business_date, status, opened_by_user_id, opened_at, "
+            f"closed_by_user_id, closed_at, closing_summary) VALUES ('{D1}', '{R}', '2026-10-31', 'CLOSED', '{U}', now(), "
+            f"'{U}', now(), '{{}}')",
+            f"INSERT INTO business_days (id, restaurant_id, business_date, status, opened_by_user_id, opened_at) "
+            f"VALUES ('{D2}', '{R}', '2026-11-01', 'OPEN', '{U}', now())",
+            f"INSERT INTO cash_registers (id, restaurant_id, name, is_active, created_at) VALUES ('{REG}', '{R}', 'Main', true, now())",
+            f"INSERT INTO cash_shifts (id, restaurant_id, cash_register_id, business_day_id, status, currency, "
+            f"opening_amount, opened_by_user_id, opened_at, closed_at) VALUES ('{S1}', '{R}', '{REG}', '{D1}', 'CLOSED', "
+            f"'EUR', 100, '{U}', now(), now())",
+            f"INSERT INTO cash_shifts (id, restaurant_id, cash_register_id, business_day_id, status, currency, "
+            f"opening_amount, opened_by_user_id, opened_at) VALUES ('{S2}', '{R}', '{REG}', '{D2}', 'OPEN', 'EUR', 130, '{U}', now())",
+        ):
+            connection.execute(text(statement))
+
+        def handover(difference, reason, day=D2, received=130):
+            return text(
+                "INSERT INTO cash_shift_handovers (id, restaurant_id, cash_register_id, business_day_id, from_shift_id, "
+                "to_shift_id, previous_expected_amount, handed_over_amount, received_amount, difference, reason, "
+                f"outgoing_user_id, incoming_user_id, created_at) VALUES (gen_random_uuid(), '{R}', '{REG}', '{day}', "
+                f"'{S1}', '{S2}', 155, 150, {received}, {difference}, {reason}, '{U}', '{U}', now())"
+            )
+
+        # A cross-day handover: received 130 for 150 counted needs a reason.
+        with pytest.raises(IntegrityError, match="ck_cash_shift_handovers_reason"), connection.begin_nested():
+            connection.execute(handover(-20, "NULL"))
+        with pytest.raises(IntegrityError, match="ck_cash_shift_handovers_difference"), connection.begin_nested():
+            connection.execute(handover(-10, "'x'"))
+        # The record belongs to the incoming shift's day, not the outgoing one.
+        with pytest.raises(IntegrityError, match="fk_cash_shift_handovers_to_shift_business_day"), connection.begin_nested():
+            connection.execute(handover(-20, "'x'", day=D1))
+        connection.execute(handover(-20, "'short by 20'"))
+        with pytest.raises(Exception, match="append-only"), connection.begin_nested():
+            connection.execute(text("UPDATE cash_shift_handovers SET reason = 'changed'"))
+
+        # A payment's business day must be its shift's.
+        with pytest.raises(IntegrityError, match="fk_payments_cash_shift_business_day"), connection.begin_nested():
+            connection.execute(
+                text(
+                    "INSERT INTO payments (id, restaurant_id, bill_id, amount, currency, method, status, user_id, "
+                    "cash_shift_id, business_day_id, confirmation_method, confirmed_at, created_at) VALUES "
+                    f"(gen_random_uuid(), '{R}', '99999999-9999-4999-8999-999999999999', 1, 'EUR', 'CASH', 'COMPLETED', "
+                    f"'{U}', '{S2}', '{D1}', 'CASH_RECEIVED', now(), now())"
+                )
+            )
+
+        # Closed periods are immutable; open ones can be closed, never deleted.
+        for statement in (
+            f"UPDATE business_days SET closing_summary = '{{\"x\": 1}}' WHERE id = '{D1}'",
+            f"UPDATE cash_shifts SET opening_amount = 1 WHERE id = '{S1}'",
+            f"DELETE FROM business_days WHERE id = '{D2}'",
+        ):
+            with pytest.raises(Exception, match="immutable once closed"), connection.begin_nested():
+                connection.execute(text(statement))
+        connection.execute(text(f"UPDATE cash_shifts SET status = 'CLOSED', closed_at = now() WHERE id = '{S2}'"))

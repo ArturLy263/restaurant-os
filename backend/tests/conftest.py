@@ -78,7 +78,7 @@ from app.db.models.bill import Bill  # noqa: E402
 from app.main import app  # noqa: E402
 
 from tests.disposable_database import disposable_database  # noqa: E402
-from tests.factories import create_order, create_restaurant  # noqa: E402
+from tests.factories import create_order, create_restaurant, open_cash_register  # noqa: E402
 
 
 # Fixtures whose use decides a test's marker; every other test is `unit`.
@@ -302,6 +302,23 @@ def db_client(db_session):
 @pytest.fixture
 def restaurant(db_session):
     return create_restaurant(db_session)
+
+
+@pytest.fixture(autouse=True)
+def _cash_register_open(request):
+    """Payments need an open business day and cash shift (Stage 3,
+    decision B). Every test using the rolled-back `restaurant` gets both,
+    like a restaurant open for business, unless its module sets
+    CASH_REGISTER_CLOSED = True to start from a closed register."""
+
+    if "restaurant" not in request.fixturenames:
+        return
+    if getattr(request.module, "CASH_REGISTER_CLOSED", False):
+        return
+    open_cash_register(
+        request.getfixturevalue("db_session"),
+        request.getfixturevalue("restaurant"),
+    )
 
 
 @pytest.fixture

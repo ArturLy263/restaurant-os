@@ -6,14 +6,24 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db.models.product import Product
-from tests.factories import auth_headers, create_restaurant
+from tests.factories import auth_headers, create_restaurant, open_cash_register
 
 
 # Deletes everything a committed test restaurant can own, children first.
+# The cash ledger is immutable (triggers refuse updates and deletes), so
+# this test cleanup alone turns triggers off for its own transaction
+# (needs a superuser, as the local and CI test databases have).
 _PURGE_RESTAURANT = [
+    "SET LOCAL session_replication_role = replica",
     "DELETE FROM idempotency_keys WHERE restaurant_id = :r",
     "DELETE FROM operational_events WHERE restaurant_id = :r",
     "DELETE FROM outbox_events WHERE restaurant_id = :r",
+    "DELETE FROM cash_movements WHERE restaurant_id = :r",
+    "DELETE FROM cash_shift_closings WHERE restaurant_id = :r",
+    "DELETE FROM cash_shift_handovers WHERE restaurant_id = :r",
+    "DELETE FROM cash_opening_corrections WHERE restaurant_id = :r",
+    "DELETE FROM refunds WHERE restaurant_id = :r",
+    "DELETE FROM payment_allocations WHERE restaurant_id = :r",
     "DELETE FROM payments WHERE bill_id IN ("
     " SELECT b.id FROM bills b JOIN orders o ON o.id = b.order_id"
     " WHERE o.restaurant_id = :r)",
@@ -37,6 +47,9 @@ _PURGE_RESTAURANT = [
     " SELECT id FROM users WHERE restaurant_id = :r)"
     " OR station_id IN (SELECT id FROM stations WHERE restaurant_id = :r)",
     "DELETE FROM stations WHERE restaurant_id = :r",
+    "DELETE FROM cash_shifts WHERE restaurant_id = :r",
+    "DELETE FROM cash_registers WHERE restaurant_id = :r",
+    "DELETE FROM business_days WHERE restaurant_id = :r",
     "DELETE FROM users WHERE restaurant_id = :r",
     "DELETE FROM roles WHERE restaurant_id = :r",
     "DELETE FROM restaurants WHERE id = :r",
@@ -53,6 +66,8 @@ def _create_committed_restaurant(db_engine, name):
             station_id=restaurant.station.id,
         )
         setup.add(coke)
+        # Payments need an open business day and cash shift.
+        shift = open_cash_register(setup, restaurant)
         setup.commit()
 
         return SimpleNamespace(
@@ -62,6 +77,8 @@ def _create_committed_restaurant(db_engine, name):
             burger_id=restaurant.product.id,
             coke_id=coke.id,
             headers=auth_headers(restaurant.user),
+            business_day_id=shift.business_day_id,
+            cash_shift_id=shift.id,
         )
 
 

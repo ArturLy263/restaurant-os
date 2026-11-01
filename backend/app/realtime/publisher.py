@@ -11,6 +11,9 @@ Routing (only the event's restaurant, never a broadcast):
 - `preparation.status_changed`: to the preparation's station.
 - `order.sent`: to each station with items in the round, each receiving
   an `order.sent` of the same version with only its own items.
+- Financial events (bills, payments, cash shifts, business days;
+  `FINANCIAL_CONTRACTS`): to no station. They are understood and count as
+  delivered, so station streams get neither the event nor a resync.
 
 What a stream receives, as JSON text:
 
@@ -55,6 +58,7 @@ from typing import Any
 
 from app.realtime.hub import StationEventHub, StationSubscription
 from app.schemas.outbox import (
+    FINANCIAL_CONTRACTS,
     OrderSentV1,
     OutboxPayload,
     PreparationStatusChangedV1,
@@ -89,6 +93,10 @@ def _route_status_changed(
     yield payload.station_id, payload
 
 
+def _route_nowhere(payload: OutboxPayload) -> Iterable[tuple[uuid.UUID, OutboxPayload]]:
+    return ()
+
+
 # Every contract's routing: (station, the payload that station receives).
 ROUTES: dict[
     type[OutboxPayload],
@@ -97,6 +105,7 @@ ROUTES: dict[
     OrderSentV1: _route_order_sent,
     PreparationStatusChangedV1: _route_status_changed,
     PreparationStatusChangedV2: _route_status_changed,
+    **{contract: _route_nowhere for contract in FINANCIAL_CONTRACTS},
 }
 
 

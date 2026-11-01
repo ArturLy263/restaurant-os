@@ -386,13 +386,26 @@ def test_payloads_carry_no_actor_or_free_text(pos, db_session, restaurant):
 
 
 def test_event_types_and_versions_are_unique():
-    contracts = [
-        (model.event_type, model.schema_version)
-        for model in OutboxPayload.__subclasses__()
-    ]
+    def concrete(model):
+        for subclass in model.__subclasses__():
+            if "event_type" in vars(subclass):
+                yield subclass
+            yield from concrete(subclass)
+
+    contracts = [(model.event_type, model.schema_version) for model in concrete(OutboxPayload)]
 
     assert sorted(contracts) == [
+        ("bill.created", 1),
+        ("business_day.closed", 1),
+        ("business_day.opened", 1),
+        ("cash_movement.created", 1),
+        ("cash_opening_balance.corrected", 1),
+        ("cash_shift.closed", 1),
+        ("cash_shift.handover_recorded", 1),
+        ("cash_shift.opened", 1),
         ("order.sent", 1),
+        ("payment.completed", 1),
+        ("payment.refunded", 1),
         ("preparation.status_changed", 1),
         ("preparation.status_changed", 2),
     ]

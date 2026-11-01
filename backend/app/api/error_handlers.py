@@ -25,18 +25,22 @@ def error_response(
     message: str,
     detail=None,
     headers: dict[str, str] | None = None,
+    details=None,
 ) -> JSONResponse:
     request_id = get_request_id(request)
+    error = {
+        "code": code,
+        "message": message,
+        "request_id": request_id,
+    }
+    if details is not None:
+        error["details"] = details
 
     return JSONResponse(
         status_code=status_code,
         content={
             "detail": message if detail is None else detail,
-            "error": {
-                "code": code,
-                "message": message,
-                "request_id": request_id,
-            },
+            "error": error,
         },
         headers={**(headers or {}), REQUEST_ID_HEADER: request_id},
     )
@@ -55,6 +59,7 @@ async def http_exception_handler(
         message=message or "HTTP error",
         detail=jsonable_encoder(exc.detail),
         headers=getattr(exc, "headers", None),
+        details=jsonable_encoder(getattr(exc, "details", None)),
     )
 
 

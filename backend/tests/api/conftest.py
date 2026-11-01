@@ -60,9 +60,13 @@ class Pos:
         )
 
     def pay(self, bill_id, amount, method="CASH"):
+        body = {"amount": amount, "method": method}
+        if method == "CARD":
+            # Confirmed by the cashier after the external terminal.
+            body["card_confirmed"] = True
         return self.client.post(
             f"/api/v1/bills/{bill_id}/payments",
-            json={"amount": amount, "method": method},
+            json=body,
             headers=self.headers,
         )
 
