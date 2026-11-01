@@ -14,6 +14,9 @@ from app.api.routes.events import router as events_router
 from app.api.routes.station_events import router as station_events_router
 from app.api.routes.tables import router as tables_router
 from app.api.routes.menu import router as menu_router
+from app.api.routes.cash import business_days_router, router as cash_router
+from app.api.routes.cashier import router as cashier_router
+from app.api.routes.payments import router as payments_router
 from app.core.config import settings
 from app.core.request_id import RequestIdMiddleware
 from app.realtime.delivery import StationDeliveryRunner
@@ -64,6 +67,10 @@ app.include_router(events_router)
 app.include_router(station_events_router)
 app.include_router(tables_router)
 app.include_router(menu_router)
+app.include_router(cashier_router)
+app.include_router(payments_router)
+app.include_router(business_days_router)
+app.include_router(cash_router)
 
 @app.get("/health")
 def health_check():

@@ -55,6 +55,20 @@ class Permission(StrEnum):
     # (an ITEM_CANCELLATION adjustment) and voiding an order with a bill.
     BILLS_ADJUST = "bills:adjust"
     PAYMENTS_CREATE = "payments:create"
+    # Return money for a payment (cash or card, confirmed by hand).
+    PAYMENTS_REFUND = "payments:refund"
+
+    # Business days and the cash register
+    BUSINESS_DAYS_OPEN = "business_days:open"
+    BUSINESS_DAYS_CLOSE = "business_days:close"
+    CASH_SHIFTS_VIEW = "cash_shifts:view"
+    CASH_SHIFTS_OPEN = "cash_shifts:open"
+    CASH_SHIFTS_CLOSE = "cash_shifts:close"
+    CASH_MOVEMENTS_CREATE = "cash_movements:create"
+    # Fix a mistyped opening amount of an open shift (no cash moves).
+    CASH_OPENING_BALANCE_CORRECT = "cash_opening_balance:correct"
+    # Shift and business day reports: revenue, tips, refunds, cash.
+    CASH_REPORTS_VIEW = "cash_reports:view"
 
     # Management
     EVENTS_VIEW = "events:view"
@@ -94,6 +108,15 @@ _CASHIER = frozenset(
         Permission.BILLS_CREATE,
         Permission.BILLS_ADJUST,
         Permission.PAYMENTS_CREATE,
+        # Several cashiers share one register: any of them opens the day,
+        # opens, hands over and closes shifts, and records cash in/out.
+        # Refunds, opening corrections, closing the day and reports are
+        # for management.
+        Permission.BUSINESS_DAYS_OPEN,
+        Permission.CASH_SHIFTS_VIEW,
+        Permission.CASH_SHIFTS_OPEN,
+        Permission.CASH_SHIFTS_CLOSE,
+        Permission.CASH_MOVEMENTS_CREATE,
     }
 )
 

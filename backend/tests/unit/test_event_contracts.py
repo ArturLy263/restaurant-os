@@ -1,7 +1,8 @@
 """Outbox event contracts (Epic D3): versions, validation, compatibility.
 
 The golden payloads below are as written since each version was added
-(v1 since D1, preparation.status_changed v2 for discards). They must keep
+(v1 since D1, preparation.status_changed v2 for discards, the financial
+contracts since Stage 3). They must keep
 parsing to the same model and dumping to the same JSON: a change that
 breaks them is a new version, not an edit (see app.schemas.outbox).
 """
@@ -12,7 +13,10 @@ import uuid
 import pytest
 
 from app.schemas.outbox import (
+    BUSINESS_DAY_AGGREGATE,
+    CASH_SHIFT_AGGREGATE,
     CONTRACTS,
+    FINANCIAL_CONTRACTS,
     ORDER_AGGREGATE,
     PREPARATION_TRANSITIONS_V1,
     PREPARATION_TRANSITIONS_V2,
@@ -38,6 +42,16 @@ PREP_1 = "4fae7a8c-bd4b-4fcd-9e95-6ab15c7d8e94"
 PREP_2 = "5abf8b9d-ce5c-4ade-8fa6-7bc26d8e9fa5"
 STATION = "6bca9cae-df6d-4bef-9ab7-8cd37e9fa0b6"
 PRODUCT = "7cdbadbf-ea7e-4cfa-8bc8-9de48fa0b1c7"
+BILL = "8dece0c0-fb8f-4d0b-9cd9-aef59ab1c2d8"
+PAYMENT = "9efdf1d1-0c9a-4e1c-8dea-bfa6abc2d3e9"
+REFUND = "a0fe02e2-1dab-4f2d-9efb-c0b7bcd3e4fa"
+DAY = "b10f13f3-2ebc-4a3e-8f0c-d1c8cde4f50b"
+SHIFT = "c2a024a4-3fcd-4b4f-9a1d-e2d9def5061c"
+PREVIOUS_SHIFT = "d3b135b5-4ade-4c5a-8b2e-f3eaef06172d"
+REGISTER = "e4c246c6-5bef-4d6b-9c3f-04fbf017283e"
+HANDOVER = "f5d357d7-6cfa-4e7c-8d4a-150c0128394f"
+MOVEMENT = "06e468e8-7d0b-4f8d-9e5b-261d1239a450"
+CORRECTION = "17f579f9-8e1c-4a9e-8f6c-372e234ab561"
 
 GOLDEN = {
     ("order.sent", 1): {
@@ -77,6 +91,57 @@ GOLDEN = {
         "previous_status": "READY",
         "status": "CANCELLED",
     },
+    ("bill.created", 1): {"bill_id": BILL, "order_id": ORDER},
+    ("payment.completed", 1): {
+        "payment_id": PAYMENT,
+        "bill_id": BILL,
+        "order_id": ORDER,
+        "business_day_id": DAY,
+        "cash_shift_id": SHIFT,
+        "method": "CARD",
+        "bill_status": "PAID",
+    },
+    ("payment.refunded", 1): {
+        "refund_id": REFUND,
+        "payment_id": PAYMENT,
+        "bill_id": BILL,
+        "order_id": ORDER,
+        "business_day_id": DAY,
+        "cash_shift_id": SHIFT,
+        "method": "CASH",
+    },
+    ("business_day.opened", 1): {"business_day_id": DAY},
+    ("business_day.closed", 1): {"business_day_id": DAY},
+    ("cash_shift.opened", 1): {
+        "cash_shift_id": SHIFT,
+        "business_day_id": DAY,
+        "cash_register_id": REGISTER,
+        "handover_id": HANDOVER,
+    },
+    ("cash_shift.closed", 1): {"cash_shift_id": SHIFT, "business_day_id": DAY},
+    ("cash_shift.handover_recorded", 1): {
+        "cash_shift_id": SHIFT,
+        "handover_id": HANDOVER,
+        "from_shift_id": PREVIOUS_SHIFT,
+        "business_day_id": DAY,
+    },
+    ("cash_movement.created", 1): {
+        "cash_shift_id": SHIFT,
+        "cash_movement_id": MOVEMENT,
+        "type": "CASH_OUT",
+    },
+    ("cash_opening_balance.corrected", 1): {
+        "cash_shift_id": SHIFT,
+        "correction_id": CORRECTION,
+    },
+}
+
+# The aggregate of each golden payload: (aggregate_type, aggregate_id).
+AGGREGATES = {
+    key: (BUSINESS_DAY_AGGREGATE, DAY) if key[0].startswith("business_day.")
+    else (CASH_SHIFT_AGGREGATE, SHIFT) if key[0].startswith(("cash_shift.", "cash_movement.", "cash_opening"))
+    else (ORDER_AGGREGATE, ORDER)
+    for key in GOLDEN
 }
 
 
@@ -110,13 +175,21 @@ def test_registry_lists_exactly_the_supported_contracts():
         ("order.sent", 1): OrderSentV1,
         ("preparation.status_changed", 1): PreparationStatusChangedV1,
         ("preparation.status_changed", 2): PreparationStatusChangedV2,
+        **{(c.event_type, c.schema_version): c for c in FINANCIAL_CONTRACTS},
     }
+    assert len(FINANCIAL_CONTRACTS) == 10
+
+    def concrete(model):
+        for subclass in model.__subclasses__():
+            if "event_type" in vars(subclass):
+                yield subclass
+            yield from concrete(subclass)
 
     # Every payload model is registered under its own type and version.
-    assert set(CONTRACTS.values()) == set(OutboxPayload.__subclasses__())
+    assert set(CONTRACTS.values()) == set(concrete(OutboxPayload))
     for (event_type, version), contract in CONTRACTS.items():
         assert (contract.event_type, contract.schema_version) == (event_type, version)
-        assert contract.aggregate_type == ORDER_AGGREGATE
+        assert contract.aggregate_type == AGGREGATES[(event_type, version)][0]
 
 
 def test_registry_is_read_only():
@@ -138,7 +211,7 @@ def test_golden_payloads_parse_and_dump_unchanged(key):
     model = parse_payload(event_type, version, golden(key))
 
     assert type(model) is CONTRACTS[key]
-    assert str(model.aggregate_id) == ORDER
+    assert (model.aggregate_type, str(model.aggregate_id)) == AGGREGATES[key]
     assert dump_payload(model) == GOLDEN[key]
 
 

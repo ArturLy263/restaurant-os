@@ -1,4 +1,5 @@
 import uuid
+from datetime import date, datetime
 from decimal import Decimal
 from functools import cache
 from types import SimpleNamespace
@@ -6,6 +7,7 @@ from types import SimpleNamespace
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token, hash_password
+from app.db.models.cash import BusinessDay, CashRegister, CashShift
 from app.db.models.category import Category
 from app.db.models.order import Order
 from app.db.models.product import Product
@@ -158,3 +160,40 @@ def create_station(db: Session, restaurant, name: str, station_type: str) -> Sta
     db.flush()
 
     return station
+
+
+def open_cash_register(
+    db: Session,
+    restaurant,
+    user: User | None = None,
+    opening_amount: Decimal = Decimal("100.00"),
+    business_date: date = date(2026, 11, 1),
+) -> CashShift:
+    """An open business day with the register's open cash shift, so that
+    payments can be taken (they require both)."""
+
+    user = user or restaurant.user
+    tenant = restaurant.restaurant
+    day = BusinessDay(
+        restaurant_id=tenant.id,
+        business_date=business_date,
+        status="OPEN",
+        opened_by_user_id=user.id,
+        opened_at=datetime.utcnow(),
+    )
+    register = CashRegister(restaurant_id=tenant.id, name="Main register")
+    db.add_all([day, register])
+    db.flush()
+    shift = CashShift(
+        restaurant_id=tenant.id,
+        cash_register_id=register.id,
+        business_day_id=day.id,
+        status="OPEN",
+        currency=tenant.currency or "EUR",
+        opening_amount=opening_amount,
+        opened_by_user_id=user.id,
+        opened_at=datetime.utcnow(),
+    )
+    db.add(shift)
+    db.flush()
+    return shift

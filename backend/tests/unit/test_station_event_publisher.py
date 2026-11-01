@@ -13,7 +13,7 @@ import pytest
 
 from app.realtime.hub import StationEventHub
 from app.realtime.publisher import ROUTES, StationEventPublisher
-from app.schemas.outbox import CONTRACTS, InvalidEventPayloadError, parse_payload
+from app.schemas.outbox import CONTRACTS, FINANCIAL_CONTRACTS, InvalidEventPayloadError, parse_payload
 from app.workers.outbox_worker import OutboxMessage
 from tests.unit.test_event_contracts import (
     GOLDEN,
@@ -301,3 +301,21 @@ def test_slow_client_overflows_without_affecting_the_others(streams):
         assert slow.drain() == []
 
     streams(scenario, queue_size=2)
+
+
+@pytest.mark.parametrize(
+    "key",
+    sorted(key for key in GOLDEN if CONTRACTS[key] in FINANCIAL_CONTRACTS),
+)
+def test_financial_events_reach_no_station_and_cause_no_resync(streams, key):
+    """Payments and cash events are for the cash desk: kitchen and bar
+    displays neither receive them nor reload because of them."""
+
+    def scenario(hub, publisher, sub):
+        kitchen, bar = sub(STATION), sub(BAR)
+
+        publisher.publish(message(*key, GOLDEN[key]))  # delivered
+
+        assert kitchen.drain() == [] and bar.drain() == []
+
+    streams(scenario)

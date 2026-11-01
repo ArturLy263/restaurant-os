@@ -88,6 +88,30 @@ class ErrorCode(StrEnum):
     BILL_AMOUNT_DUE = "BILL_AMOUNT_DUE"
     INVALID_PAYMENT_AMOUNT = "INVALID_PAYMENT_AMOUNT"
     PAYMENT_EXCEEDS_AMOUNT_DUE = "PAYMENT_EXCEEDS_AMOUNT_DUE"
+    PAYMENT_NOT_FOUND = "PAYMENT_NOT_FOUND"
+    PAYMENT_AMOUNT_MISMATCH = "PAYMENT_AMOUNT_MISMATCH"
+    CARD_CONFIRMATION_REQUIRED = "CARD_CONFIRMATION_REQUIRED"
+    ORDER_ITEM_ALREADY_PAID = "ORDER_ITEM_ALREADY_PAID"
+    ORDER_ITEM_NOT_PAYABLE = "ORDER_ITEM_NOT_PAYABLE"
+    INVALID_SPLIT = "INVALID_SPLIT"
+    REFUND_EXCEEDS_REFUNDABLE = "REFUND_EXCEEDS_REFUNDABLE"
+
+    # Business days and cash
+    BUSINESS_DAY_NOT_FOUND = "BUSINESS_DAY_NOT_FOUND"
+    NO_OPEN_BUSINESS_DAY = "NO_OPEN_BUSINESS_DAY"
+    BUSINESS_DAY_ALREADY_OPEN = "BUSINESS_DAY_ALREADY_OPEN"
+    BUSINESS_DAY_EXISTS = "BUSINESS_DAY_EXISTS"
+    BUSINESS_DAY_NOT_OPEN = "BUSINESS_DAY_NOT_OPEN"
+    BUSINESS_DAY_HAS_OPEN_ORDERS = "BUSINESS_DAY_HAS_OPEN_ORDERS"
+    CASH_SHIFT_STILL_OPEN = "CASH_SHIFT_STILL_OPEN"
+    CASH_SHIFT_NOT_FOUND = "CASH_SHIFT_NOT_FOUND"
+    NO_OPEN_CASH_SHIFT = "NO_OPEN_CASH_SHIFT"
+    CASH_SHIFT_ALREADY_OPEN = "CASH_SHIFT_ALREADY_OPEN"
+    CASH_SHIFT_NOT_OPEN = "CASH_SHIFT_NOT_OPEN"
+    HANDOVER_REASON_REQUIRED = "HANDOVER_REASON_REQUIRED"
+    CLOSING_EXPLANATION_REQUIRED = "CLOSING_EXPLANATION_REQUIRED"
+    OPENING_AMOUNT_UNCHANGED = "OPENING_AMOUNT_UNCHANGED"
+    INSUFFICIENT_CASH = "INSUFFICIENT_CASH"
 
     # Idempotency
     IDEMPOTENCY_KEY_INVALID = "IDEMPOTENCY_KEY_INVALID"
@@ -110,7 +134,8 @@ STATUS_ERROR_CODES = {
 class ApiError(HTTPException):
     """An HTTPException with a stable machine-readable error code.
 
-    The message becomes both `detail` and `error.message`.
+    The message becomes both `detail` and `error.message`; `details`,
+    if given, becomes `error.details`.
     """
 
     def __init__(
@@ -119,6 +144,7 @@ class ApiError(HTTPException):
         code: ErrorCode,
         message: str,
         headers: dict[str, str] | None = None,
+        details: dict | None = None,
     ):
         super().__init__(
             status_code=status_code,
@@ -126,6 +152,9 @@ class ApiError(HTTPException):
             headers=headers,
         )
         self.code = code
+        # Optional structured data, sent as `error.details` (e.g. what
+        # blocks closing a business day).
+        self.details = details
 
 
 def error_code_for(exc: HTTPException) -> str:

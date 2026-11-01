@@ -166,7 +166,7 @@ def test_concurrent_payments_with_same_key_pay_once(db_engine, live):
         order_id,
         "POST",
         f"/api/v1/bills/{bill_id}/payments",
-        json={"amount": "5.00", "method": "CARD"},
+        json={"amount": "5.00", "method": "CARD", "card_confirmed": True},
         headers=live.headers("pay-race"),
     )
 

@@ -3,17 +3,29 @@ from datetime import datetime
 from decimal import Decimal
 
 from fastapi import status
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.errors import ApiError, ErrorCode
 from app.core.states import BILL, ORDER, TABLE
-from app.db.models.bill import Bill, Payment
+from app.db.models.bill import Bill, Payment, PaymentAllocation, Refund
+from app.db.models.cash import BusinessDay, CashMovement, CashShift
 from app.db.models.order import Order, OrderItem
+from app.db.models.restaurant import Restaurant
 from app.db.models.table import Table
 from app.db.unit_of_work import commit
+from app.payments.providers import confirmer_for
 from app.repositories.bill_repository import BillRepository
+from app.repositories.cash_repository import CashRepository
 from app.repositories.order_repository import OrderRepository
+from app.schemas.outbox import BillCreatedV1, PaymentCompletedV1, PaymentRefundedV1
+from app.services.cash_service import CashService
 from app.services.event_service import EventService
+from app.services.outbox_service import OutboxService
+
+ZERO = Decimal("0.00")
+# Equal splits: at most this many shares.
+MAX_SPLIT_PARTS = 50
 
 
 class BillService:
@@ -85,6 +97,12 @@ class BillService:
         db.add(bill)
         db.flush()
 
+        OutboxService.record(
+            db=db,
+            restaurant_id=restaurant_id,
+            payload=BillCreatedV1(bill_id=bill.id, order_id=order.id),
+        )
+
         EventService.record(
             db=db,
             restaurant_id=restaurant_id,
@@ -113,7 +131,21 @@ class BillService:
         bill_id: uuid.UUID,
         amount: Decimal,
         method: str,
+        *,
+        tip_amount: Decimal = ZERO,
+        order_item_ids: list[uuid.UUID] | None = None,
+        external_reference: str | None = None,
+        card_confirmed: bool = False,
     ) -> Payment:
+        """Record money taken for a bill in the open cash shift.
+
+        `amount` pays the bill (never more than is due); `tip_amount` is
+        on top and owed nothing. With `order_item_ids` the payment pays
+        exactly those items (splitting by items): `amount` must equal
+        their total and each item can be paid only once. A card payment
+        needs the cashier's confirmation that the external terminal
+        approved it (`card_confirmed`).
+        """
 
         bill = db.get(Bill, bill_id)
 
@@ -172,6 +204,8 @@ class BillService:
         adjusted_total = bill.adjusted_total
         remaining_amount = bill.amount_due
 
+        items = BillService._items_to_pay(db, order, amount, order_item_ids)
+
         if amount > remaining_amount:
             raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
@@ -202,15 +236,60 @@ class BillService:
                     ),
                 )
 
+        confirmation = confirmer_for(method).confirm(
+            cashier_confirmed=card_confirmed,
+            external_reference=external_reference,
+        )
+
+        # After the order lock: the day can't close and the shift can't
+        # close or hand over until this payment has committed.
+        day, shift = BillService._lock_open_day_and_shift(db, restaurant_id)
+
         payment = Payment(
+            restaurant_id=restaurant_id,
             bill_id=bill.id,
             amount=amount,
+            tip_amount=tip_amount,
+            currency=shift.currency,
             method=method,
             status="COMPLETED",
+            user_id=user_id,
+            cash_shift_id=shift.id,
+            business_day_id=day.id,
+            confirmation_method=confirmation.method,
+            confirmed_at=confirmation.confirmed_at,
+            external_reference=confirmation.external_reference,
             created_at=datetime.utcnow(),
         )
 
         db.add(payment)
+        db.flush()
+
+        for item in items:
+            db.add(
+                PaymentAllocation(
+                    restaurant_id=restaurant_id,
+                    payment_id=payment.id,
+                    order_item_id=item.id,
+                    amount=item.total_price,
+                    created_at=payment.created_at,
+                )
+            )
+
+        # A cash tip goes into the drawer: its own line, never revenue.
+        if method == "CASH" and tip_amount > ZERO:
+            db.add(
+                CashMovement(
+                    restaurant_id=restaurant_id,
+                    cash_shift_id=shift.id,
+                    type="CASH_TIP",
+                    amount=tip_amount,
+                    payment_id=payment.id,
+                    user_id=user_id,
+                    created_at=payment.created_at,
+                )
+            )
+
         db.flush()
 
         EventService.record(
@@ -225,7 +304,14 @@ class BillService:
                 "order_id": str(order.id),
                 "order_created_by": str(order.user_id),
                 "amount": str(amount),
+                "tip_amount": str(tip_amount),
+                "currency": payment.currency,
                 "method": method,
+                "confirmation_method": confirmation.method,
+                "external_reference": confirmation.external_reference,
+                "cash_shift_id": str(shift.id),
+                "business_day_id": str(day.id),
+                "order_item_ids": [str(item.id) for item in items],
             },
         )
 
@@ -259,10 +345,274 @@ class BillService:
                 },
             )
 
+        OutboxService.record(
+            db=db,
+            restaurant_id=restaurant_id,
+            payload=PaymentCompletedV1(
+                payment_id=payment.id,
+                bill_id=bill.id,
+                order_id=order.id,
+                business_day_id=day.id,
+                cash_shift_id=shift.id,
+                method=method,
+                bill_status=bill.status,
+            ),
+        )
+
         commit(db)
         db.refresh(payment)
 
         return payment
+
+    @staticmethod
+    def _lock_open_day_and_shift(
+        db: Session,
+        restaurant_id: uuid.UUID,
+    ) -> tuple[BusinessDay, CashShift]:
+        repository = CashRepository(db)
+        day = repository.lock_open_business_day(restaurant_id)
+        if day is None:
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.NO_OPEN_BUSINESS_DAY,
+                message="No business day is open; open the day first",
+            )
+        shift = repository.lock_open_shift(restaurant_id)
+        if shift is None:
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.NO_OPEN_CASH_SHIFT,
+                message="The register has no open cash shift; open one first",
+            )
+        # A day can't close while a shift is open, and a shift opens only
+        # in the open day, so the open shift is always in the open day.
+        if shift.business_day_id != day.id:
+            raise RuntimeError("The open cash shift is not in the open business day")
+        return day, shift
+
+    @staticmethod
+    def _items_to_pay(
+        db: Session,
+        order: Order,
+        amount: Decimal,
+        order_item_ids: list[uuid.UUID] | None,
+    ) -> list[OrderItem]:
+        """The items a split-by-items payment pays, checked under the
+        order lock; the unique allocation per item is the backstop."""
+
+        if not order_item_ids:
+            return []
+        ids = set(order_item_ids)
+        items = db.scalars(
+            select(OrderItem).where(
+                OrderItem.order_id == order.id,
+                OrderItem.id.in_(ids),
+            )
+        ).all()
+        if len(items) != len(ids) or any(item.status == "CANCELLED" for item in items):
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.ORDER_ITEM_NOT_PAYABLE,
+                message="Every item must be an uncancelled item of this order",
+            )
+        paid = db.scalars(
+            select(PaymentAllocation.order_item_id).where(
+                PaymentAllocation.order_item_id.in_(ids)
+            )
+        ).all()
+        if paid:
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.ORDER_ITEM_ALREADY_PAID,
+                message=f"{len(paid)} of the items are already paid",
+            )
+        total = sum((item.total_price for item in items), ZERO)
+        if total != amount:
+            raise ApiError(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                code=ErrorCode.PAYMENT_AMOUNT_MISMATCH,
+                message=f"The selected items total {total:.2f}, not {amount:.2f}",
+            )
+        return sorted(items, key=lambda item: (item.created_at, item.id))
+
+    @staticmethod
+    def refund_payment(
+        db: Session,
+        restaurant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        payment_id: uuid.UUID,
+        amount: Decimal,
+        tip_amount: Decimal,
+        reason: str,
+        *,
+        external_reference: str | None = None,
+        card_confirmed: bool = False,
+    ) -> Refund:
+        """Return money for a payment, the way it was paid, in the open
+        shift and business day. The payment and the bill are kept as they
+        are (a refund does not reopen a bill); `amount` reduces revenue,
+        `tip_amount` reduces tips only; together they never exceed what
+        the payment took."""
+
+        payment = db.scalar(
+            select(Payment).where(
+                Payment.id == payment_id,
+                Payment.restaurant_id == restaurant_id,
+            )
+        )
+        if payment is None:
+            raise ApiError(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code=ErrorCode.PAYMENT_NOT_FOUND,
+                message="Payment not found",
+            )
+        bill = db.get(Bill, payment.bill_id)
+        # Same lock as payments: refunds of one payment are serialized.
+        order = OrderRepository(db).get_for_restaurant(
+            bill.order_id,
+            restaurant_id,
+            for_update=True,
+        )
+        payment = db.scalar(
+            select(Payment)
+            .where(Payment.id == payment_id)
+            .options(selectinload(Payment.refunds))
+            .execution_options(populate_existing=True)
+        )
+
+        if amount + tip_amount <= ZERO:
+            raise ApiError(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                code=ErrorCode.VALIDATION_ERROR,
+                message="Refund a positive amount, tip or both",
+            )
+        refundable = payment.amount - payment.refunded_amount
+        refundable_tip = payment.tip_amount - payment.refunded_tip_amount
+        if amount > refundable or tip_amount > refundable_tip:
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.REFUND_EXCEEDS_REFUNDABLE,
+                message=(
+                    f"At most {refundable:.2f} of the payment and "
+                    f"{refundable_tip:.2f} of its tip can still be refunded"
+                ),
+            )
+
+        confirmation = confirmer_for(payment.method).confirm(
+            cashier_confirmed=card_confirmed,
+            external_reference=external_reference,
+        )
+        day, shift = BillService._lock_open_day_and_shift(db, restaurant_id)
+        if payment.method == "CASH":
+            CashService.ensure_cash_available(db, shift, amount + tip_amount)
+
+        now = datetime.utcnow()
+        refund = Refund(
+            restaurant_id=restaurant_id,
+            payment_id=payment.id,
+            cash_shift_id=shift.id,
+            business_day_id=day.id,
+            amount=amount,
+            tip_amount=tip_amount,
+            currency=payment.currency,
+            method=payment.method,
+            confirmation_method=confirmation.method,
+            external_reference=confirmation.external_reference,
+            reason=reason,
+            user_id=user_id,
+            created_at=now,
+        )
+        db.add(refund)
+        db.flush()
+
+        if payment.method == "CASH":
+            db.add(
+                CashMovement(
+                    restaurant_id=restaurant_id,
+                    cash_shift_id=shift.id,
+                    type="CASH_REFUND",
+                    amount=amount + tip_amount,
+                    refund_id=refund.id,
+                    user_id=user_id,
+                    created_at=now,
+                )
+            )
+
+        EventService.record(
+            db=db,
+            restaurant_id=restaurant_id,
+            user_id=user_id,
+            event_type="payment.refunded",
+            entity_type="refund",
+            entity_id=refund.id,
+            metadata={
+                "payment_id": str(payment.id),
+                "bill_id": str(bill.id),
+                "order_id": str(order.id),
+                "amount": str(amount),
+                "tip_amount": str(tip_amount),
+                "method": payment.method,
+                "confirmation_method": confirmation.method,
+                "external_reference": confirmation.external_reference,
+                "reason": reason,
+                "cash_shift_id": str(shift.id),
+                "business_day_id": str(day.id),
+                "payment_cash_shift_id": (
+                    str(payment.cash_shift_id) if payment.cash_shift_id else None
+                ),
+            },
+        )
+        OutboxService.record(
+            db=db,
+            restaurant_id=restaurant_id,
+            payload=PaymentRefundedV1(
+                refund_id=refund.id,
+                payment_id=payment.id,
+                bill_id=bill.id,
+                order_id=order.id,
+                business_day_id=day.id,
+                cash_shift_id=shift.id,
+                method=payment.method,
+            ),
+        )
+        commit(db)
+        db.refresh(refund)
+        return refund
+
+    @staticmethod
+    def equal_split(
+        db: Session,
+        restaurant_id: uuid.UUID,
+        bill_id: uuid.UUID,
+        parts: int,
+    ) -> list[Decimal]:
+        """The amount due in `parts` shares, to the cent: every share is
+        the amount divided down to the cent, and the cents left over go
+        one each to the first shares, so the shares always add up to the
+        amount due exactly. A proposal: each share is then an ordinary
+        payment, checked against the amount due when it is made."""
+
+        bill = BillService.get_bill(db, restaurant_id, bill_id)
+        due_cents = int(bill.amount_due * 100)
+        if bill.status != "OPEN" or due_cents <= 0:
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.BILL_NOT_OPEN,
+                message="Nothing is due on this bill",
+            )
+        if not 2 <= parts <= min(MAX_SPLIT_PARTS, due_cents):
+            raise ApiError(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                code=ErrorCode.INVALID_SPLIT,
+                message=(
+                    f"Split into 2 to {min(MAX_SPLIT_PARTS, due_cents)} shares"
+                ),
+            )
+        share, remainder = divmod(due_cents, parts)
+        return [
+            Decimal(share + (1 if index < remainder else 0)) / 100
+            for index in range(parts)
+        ]
 
     @staticmethod
     def get_bill(

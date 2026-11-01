@@ -33,13 +33,16 @@ unknown pair raises `UnsupportedEventError` (not malformed, just not
 understood: skip or park it, do not guess), a known pair with a payload
 that breaks its contract raises `InvalidEventPayloadError`.
 
-Every event below uses the order as its aggregate (`aggregate_type`
-"order", `aggregate_id` the payload's `order_id`): every change they
-describe is made under that order's row lock, so one order's events are
-created in the order they were committed.
+Order, preparation, bill and payment events use the order as their
+aggregate (`aggregate_type` "order", `aggregate_id` the payload's
+`order_id`): every change they describe is made under that order's row
+lock, so one order's events are created in the order they were committed.
+Cash shift events use the shift ("cash_shift"; for a handover, the
+incoming shift), made under the shift's row lock, and business day events
+the day ("business_day").
 
 Payloads hold identifiers and states only. They carry no actor, names,
-prices, notes or free-text reasons: who did what is audit history
+prices, amounts, notes or free-text reasons: who did what is audit history
 (operational_events), and consumers that need more read it through the
 API with their own permissions.
 """
@@ -54,6 +57,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 
 ORDER_AGGREGATE = "order"
+CASH_SHIFT_AGGREGATE = "cash_shift"
+BUSINESS_DAY_AGGREGATE = "business_day"
+
+PaymentMethod = Literal["CASH", "CARD"]
 
 PreparationStatus = Literal[
     "PENDING",
@@ -225,6 +232,159 @@ class PreparationStatusChangedV2(OutboxPayload):
         return self
 
 
+class BillCreatedV1(OutboxPayload):
+    """`bill.created` v1: an order's bill was issued."""
+
+    event_type: ClassVar[str] = "bill.created"
+    schema_version: ClassVar[int] = 1
+    aggregate_type: ClassVar[str] = ORDER_AGGREGATE
+
+    bill_id: uuid.UUID
+    order_id: uuid.UUID
+
+    @property
+    def aggregate_id(self) -> uuid.UUID:
+        return self.order_id
+
+
+class PaymentCompletedV1(OutboxPayload):
+    """`payment.completed` v1: a payment was recorded for a bill, in a
+    cash shift of a business day. `bill_status` is the bill's status
+    after it (PAID when it settled the bill)."""
+
+    event_type: ClassVar[str] = "payment.completed"
+    schema_version: ClassVar[int] = 1
+    aggregate_type: ClassVar[str] = ORDER_AGGREGATE
+
+    payment_id: uuid.UUID
+    bill_id: uuid.UUID
+    order_id: uuid.UUID
+    business_day_id: uuid.UUID
+    cash_shift_id: uuid.UUID
+    method: PaymentMethod
+    bill_status: Literal["OPEN", "PAID"]
+
+    @property
+    def aggregate_id(self) -> uuid.UUID:
+        return self.order_id
+
+
+class PaymentRefundedV1(OutboxPayload):
+    """`payment.refunded` v1: money was returned for a payment, in the
+    cash shift and business day of the refund."""
+
+    event_type: ClassVar[str] = "payment.refunded"
+    schema_version: ClassVar[int] = 1
+    aggregate_type: ClassVar[str] = ORDER_AGGREGATE
+
+    refund_id: uuid.UUID
+    payment_id: uuid.UUID
+    bill_id: uuid.UUID
+    order_id: uuid.UUID
+    business_day_id: uuid.UUID
+    cash_shift_id: uuid.UUID
+    method: PaymentMethod
+
+    @property
+    def aggregate_id(self) -> uuid.UUID:
+        return self.order_id
+
+
+class BusinessDayOpenedV1(OutboxPayload):
+    event_type: ClassVar[str] = "business_day.opened"
+    schema_version: ClassVar[int] = 1
+    aggregate_type: ClassVar[str] = BUSINESS_DAY_AGGREGATE
+
+    business_day_id: uuid.UUID
+
+    @property
+    def aggregate_id(self) -> uuid.UUID:
+        return self.business_day_id
+
+
+class BusinessDayClosedV1(OutboxPayload):
+    event_type: ClassVar[str] = "business_day.closed"
+    schema_version: ClassVar[int] = 1
+    aggregate_type: ClassVar[str] = BUSINESS_DAY_AGGREGATE
+
+    business_day_id: uuid.UUID
+
+    @property
+    def aggregate_id(self) -> uuid.UUID:
+        return self.business_day_id
+
+
+class _CashShiftEvent(OutboxPayload):
+    aggregate_type: ClassVar[str] = CASH_SHIFT_AGGREGATE
+
+    cash_shift_id: uuid.UUID
+
+    @property
+    def aggregate_id(self) -> uuid.UUID:
+        return self.cash_shift_id
+
+
+class CashShiftOpenedV1(_CashShiftEvent):
+    """`cash_shift.opened` v1; `handover_id` links it to the register's
+    previous shift (null for a register's first shift)."""
+
+    event_type: ClassVar[str] = "cash_shift.opened"
+    schema_version: ClassVar[int] = 1
+
+    business_day_id: uuid.UUID
+    cash_register_id: uuid.UUID
+    handover_id: uuid.UUID | None
+
+
+class CashShiftClosedV1(_CashShiftEvent):
+    event_type: ClassVar[str] = "cash_shift.closed"
+    schema_version: ClassVar[int] = 1
+
+    business_day_id: uuid.UUID
+
+
+class CashShiftHandoverRecordedV1(_CashShiftEvent):
+    """`cash_shift.handover_recorded` v1: the drawer passed to
+    `cash_shift_id` (the incoming shift) from `from_shift_id`."""
+
+    event_type: ClassVar[str] = "cash_shift.handover_recorded"
+    schema_version: ClassVar[int] = 1
+
+    handover_id: uuid.UUID
+    from_shift_id: uuid.UUID
+    business_day_id: uuid.UUID
+
+
+class CashMovementCreatedV1(_CashShiftEvent):
+    event_type: ClassVar[str] = "cash_movement.created"
+    schema_version: ClassVar[int] = 1
+
+    cash_movement_id: uuid.UUID
+    type: Literal["CASH_IN", "CASH_OUT"]
+
+
+class CashOpeningBalanceCorrectedV1(_CashShiftEvent):
+    event_type: ClassVar[str] = "cash_opening_balance.corrected"
+    schema_version: ClassVar[int] = 1
+
+    correction_id: uuid.UUID
+
+
+# Contracts that concern the cash desk, not the kitchen or bar.
+FINANCIAL_CONTRACTS = (
+    BillCreatedV1,
+    PaymentCompletedV1,
+    PaymentRefundedV1,
+    BusinessDayOpenedV1,
+    BusinessDayClosedV1,
+    CashShiftOpenedV1,
+    CashShiftClosedV1,
+    CashShiftHandoverRecordedV1,
+    CashMovementCreatedV1,
+    CashOpeningBalanceCorrectedV1,
+)
+
+
 def preparation_status_changed(**fields) -> OutboxPayload:
     """The lowest version of `preparation.status_changed` that describes
     the transition (v1, or v2 for READY -> CANCELLED)."""
@@ -254,6 +414,7 @@ CONTRACTS: Mapping[tuple[str, int], type[OutboxPayload]] = _register(
     OrderSentV1,
     PreparationStatusChangedV1,
     PreparationStatusChangedV2,
+    *FINANCIAL_CONTRACTS,
 )
 
 

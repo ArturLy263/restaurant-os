@@ -71,6 +71,38 @@ ENDPOINTS = [
      "bills:adjust", {"CASHIER"} | MANAGEMENT),
     ("GET", "/api/v1/events", None,
      "events:view", MANAGEMENT),
+    # Cashier module (Stage 3).
+    ("GET", f"/api/v1/bills/{_ID}/split?parts=2", None,
+     "bills:view", {"CASHIER"} | MANAGEMENT),
+    ("GET", "/api/v1/cashier/orders", None,
+     "bills:view", {"CASHIER"} | MANAGEMENT),
+    ("POST", f"/api/v1/payments/{_ID}/refunds", {"amount": "1.00", "reason": "x"},
+     "payments:refund", MANAGEMENT),
+    ("POST", "/api/v1/business-days", {},
+     "business_days:open", {"CASHIER"} | MANAGEMENT),
+    ("POST", f"/api/v1/business-days/{_ID}/close", None,
+     "business_days:close", MANAGEMENT),
+    ("GET", "/api/v1/business-days", None,
+     "cash_reports:view", MANAGEMENT),
+    ("GET", f"/api/v1/business-days/{_ID}/report", None,
+     "cash_reports:view", MANAGEMENT),
+    ("GET", "/api/v1/cash/register", None,
+     "cash_shifts:view", {"CASHIER"} | MANAGEMENT),
+    ("GET", "/api/v1/cash/handovers", None,
+     "cash_shifts:view", {"CASHIER"} | MANAGEMENT),
+    ("POST", "/api/v1/cash/shifts", {"opening_amount": "100.00"},
+     "cash_shifts:open", {"CASHIER"} | MANAGEMENT),
+    ("GET", f"/api/v1/cash/shifts/{_ID}", None,
+     "cash_shifts:view", {"CASHIER"} | MANAGEMENT),
+    ("POST", f"/api/v1/cash/shifts/{_ID}/close", {"counted_amount": "1.00"},
+     "cash_shifts:close", {"CASHIER"} | MANAGEMENT),
+    # Also needs cash_shifts:open (same roles).
+    ("POST", f"/api/v1/cash/shifts/{_ID}/handover", {"counted_amount": "1.00", "received_amount": "1.00"},
+     "cash_shifts:close", {"CASHIER"} | MANAGEMENT),
+    ("POST", f"/api/v1/cash/shifts/{_ID}/opening-corrections", {"opening_amount": "1.00", "reason": "x"},
+     "cash_opening_balance:correct", MANAGEMENT),
+    ("POST", f"/api/v1/cash/shifts/{_ID}/movements", {"type": "CASH_IN", "amount": "1.00", "reason": "x"},
+     "cash_movements:create", {"CASHIER"} | MANAGEMENT),
 ]
 
 PUBLIC_ROUTES = {("POST", "/api/v1/auth/login"), ("GET", "/health")}
@@ -91,6 +123,7 @@ EXPECTED_ROLE_PERMISSIONS = {
         if role in MANAGEMENT
         else set()
     )
+
     | (
         {"preparations:all_stations"}
         if role in MANAGEMENT | {"WAITER"}
@@ -147,7 +180,7 @@ def test_every_route_is_mapped_to_a_permission():
         for method in operations
     }
     mapped = {
-        (method, path.replace(_ID, "{id}"))
+        (method, path.split("?")[0].replace(_ID, "{id}"))
         for method, path, *_ in ENDPOINTS
     }
     normalized = {
@@ -187,8 +220,14 @@ def test_endpoint_access_by_role(db_client, staff, role, endpoint):
     if role in allowed_roles:
         # Authorized: the request reaches the endpoint, which then finds
         # nothing with these made-up IDs (or lists no events), or, for a
-        # station role, refuses a station it is not assigned to.
-        assert response.status_code in (200, 403, 404), response.text
+        # station role, refuses a station it is not assigned to, or finds
+        # the restaurant's day and shift already open.
+        assert response.status_code in (200, 403, 404, 409), response.text
+        if response.status_code == 409:
+            assert response.json()["error"]["code"] in {
+                "BUSINESS_DAY_ALREADY_OPEN",
+                "CASH_SHIFT_ALREADY_OPEN",
+            }
         if response.status_code == 404:
             assert response.json()["error"]["code"].endswith("_NOT_FOUND")
         if response.status_code == 403:

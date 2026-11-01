@@ -59,9 +59,12 @@ def bill(db_client, restaurant, headers):
 @pytest.fixture
 def pay(db_client, bill, headers):
     def _pay(amount, method="CASH"):
+        body = {"amount": amount, "method": method}
+        if method == "CARD":
+            body["card_confirmed"] = True
         return db_client.post(
             f"/api/v1/bills/{bill['id']}/payments",
-            json={"amount": amount, "method": method},
+            json=body,
             headers=headers,
         )
 
