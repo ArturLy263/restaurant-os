@@ -66,14 +66,19 @@ def test_models_default_to_the_initial_status_and_declare_the_check(table):
 
 
 def test_migration_copy_of_the_statuses_matches_the_rules():
-    path = BACKEND / "alembic" / "versions" / "f4c2a8d6b1e3_restrict_status_values.py"
-    spec = importlib.util.spec_from_file_location("restrict_status_values", path)
-    migration = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(migration)
+    """Each migration that adds status checks keeps its own copy of the
+    vocabularies (STATUSES); together they match the rules."""
 
-    assert {table: set(values) for table, values in migration.STATUSES.items()} == {
-        table: set(machine.statuses) for table, machine in BY_TABLE.items()
-    }
+    copies = {}
+    for path in sorted((BACKEND / "alembic" / "versions").glob("*.py")):
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+        for table, values in getattr(migration, "STATUSES", {}).items():
+            assert table not in copies, f"{table} declared twice"
+            copies[table] = set(values)
+
+    assert copies == {table: set(machine.statuses) for table, machine in BY_TABLE.items()}
 
 
 def test_services_change_statuses_only_through_the_rules():
