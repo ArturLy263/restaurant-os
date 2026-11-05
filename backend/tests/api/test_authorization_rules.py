@@ -1,7 +1,8 @@
 """C1.1 authorization rules: who may change which order, bill and dish.
 
-1. Billed items are cancelled only through the bill (bills:adjust); the
-   order endpoints never change an issued bill. Managers may override the
+1. Billed items are cancelled only through the bill (bills:adjust,
+   management only since Stage 3.1); the order endpoints never change an
+   issued bill. Managers may override the
    creator-only order rule, within the state and financial rules.
 2. Waiters may serve only READY preparations.
 3. Waiters may view, but not modify, other waiters' orders.
@@ -225,11 +226,24 @@ def test_waiter_cannot_use_the_financial_cancellation(as_):
     assert as_.pos.adjustments(bill_id) == []
 
 
-def test_cashier_cancels_billed_item_through_bill_adjustment(as_, staff):
-    order_id, burger_id, _, bill_id = waiters_billed_order(as_)
-    cashier = as_("CASHIER")
+def test_cashier_cannot_lower_a_bill(as_):
+    """Lowering what is owed is a management decision (Stage 3.1): a
+    cashier who could cancel billed items could keep the difference."""
 
-    response = cashier.cancel_billed(bill_id, burger_id, reason="Cold burger")
+    order_id, burger_id, _, bill_id = waiters_billed_order(as_)
+
+    response = as_("CASHIER").cancel_billed(bill_id, burger_id, reason="Cold burger")
+
+    assert_error(response, 403, "PERMISSION_DENIED", "Missing permission: bills:adjust")
+    assert as_.pos.adjustments(bill_id) == []
+    assert as_.pos.bill(bill_id).amount_due == Decimal("15.00")
+
+
+def test_manager_cancels_billed_item_through_bill_adjustment(as_, staff):
+    order_id, burger_id, _, bill_id = waiters_billed_order(as_)
+    manager = as_("MANAGER")
+
+    response = manager.cancel_billed(bill_id, burger_id, reason="Cold burger")
 
     assert response.status_code == 200
     bill = response.json()
@@ -239,41 +253,42 @@ def test_cashier_cancels_billed_item_through_bill_adjustment(as_, staff):
     assert bill["amount_due"] == "2.50"
     assert [a["type"] for a in bill["adjustments"]] == ["ITEM_CANCELLATION"]
 
-    [adjustment] = cashier.adjustments(bill_id)
-    assert adjustment.user_id == staff["CASHIER"].id
+    [adjustment] = manager.adjustments(bill_id)
+    assert adjustment.user_id == staff["MANAGER"].id
     assert adjustment.reason == "Cold burger"
-    assert cashier.item(burger_id).status == "CANCELLED"
-    assert cashier.preparation(burger_id).status == "CANCELLED"
-    cashier.assert_bill_matches_items(bill_id)
+    assert manager.item(burger_id).status == "CANCELLED"
+    assert manager.preparation(burger_id).status == "CANCELLED"
+    manager.assert_bill_matches_items(bill_id)
 
-    adjusted = event(cashier, "bill.adjusted")
-    assert adjusted.user_id == staff["CASHIER"].id
+    adjusted = event(manager, "bill.adjusted")
+    assert adjusted.user_id == staff["MANAGER"].id
     assert adjusted.event_metadata["order_created_by"] == str(staff["WAITER"].id)
-    assert event(cashier, "item.cancelled").user_id == staff["CASHIER"].id
+    assert event(manager, "item.cancelled").user_id == staff["MANAGER"].id
 
 
 def test_financial_cancellation_keeps_bill_rules(as_):
     _, burger_id, coke_id, bill_id = waiters_billed_order(as_)
     as_("KITCHEN").start_preparation(coke_id, "start", "ready")
-    cashier = as_("CASHIER")
+    manager = as_("MANAGER")
 
-    assert_error(cashier.cancel_billed(bill_id, coke_id), 409, "ORDER_ITEM_NOT_CANCELLABLE")
+    assert_error(manager.cancel_billed(bill_id, coke_id), 409, "ORDER_ITEM_NOT_CANCELLABLE")
 
-    assert cashier.pay(bill_id, "1.00").status_code == 201
+    assert as_("CASHIER").pay(bill_id, "1.00").status_code == 201
+    manager = as_("MANAGER")
     assert_error(
-        cashier.cancel_billed(bill_id, burger_id),
+        manager.cancel_billed(bill_id, burger_id),
         409,
         "BILL_HAS_PAYMENTS",
         "Cannot cancel an order item after payment has been made",
     )
-    assert cashier.adjustments(bill_id) == []
+    assert manager.adjustments(bill_id) == []
 
 
 def test_financial_cancellation_checks_the_item_belongs_to_the_bill(as_):
     _, _, _, bill_id = waiters_billed_order(as_)
     _, other_item_id = _second_table_order(as_)
 
-    response = as_("CASHIER").cancel_billed(bill_id, other_item_id)
+    response = as_("MANAGER").cancel_billed(bill_id, other_item_id)
 
     assert_error(response, 404, "ORDER_ITEM_NOT_FOUND")
     assert as_.pos.item(other_item_id).status == "SENT"
@@ -309,7 +324,7 @@ def test_financial_cancellation_of_another_restaurants_bill_looks_missing(
 ):
     _, burger_id, _, bill_id = waiters_billed_order(as_)
     other = create_restaurant(db_session, name="Other Restaurant")
-    foreign_cashier = create_user(db_session, other, "CASHIER")
+    foreign_cashier = create_user(db_session, other, "MANAGER")
     client = as_.pos.client
 
     foreign = client.post(
@@ -331,10 +346,10 @@ def test_financial_cancellation_of_another_restaurants_bill_looks_missing(
 
 def test_voiding_a_billed_order_needs_bills_adjust(as_, staff):
     order_id, burger_id, coke_id, bill_id = waiters_billed_order(as_)
-    cashier = as_("CASHIER")
-    assert cashier.cancel_billed(bill_id, burger_id).status_code == 200
-    assert cashier.cancel_billed(bill_id, coke_id).status_code == 200
-    assert cashier.bill(bill_id).amount_due == Decimal("0.00")
+    manager = as_("MANAGER")
+    assert manager.cancel_billed(bill_id, burger_id).status_code == 200
+    assert manager.cancel_billed(bill_id, coke_id).status_code == 200
+    assert manager.bill(bill_id).amount_due == Decimal("0.00")
 
     # The creator may not void the financial document...
     response = as_("WAITER").void(order_id)

@@ -86,9 +86,11 @@ class Bill(Base):
         back_populates="bill",
     )
 
+    # No delete cascade: payments are financial history (append-only, see
+    # migration f2a8c6e4b1d9); a bill with payments is never deleted.
     payments: Mapped[list["Payment"]] = relationship(
         back_populates="bill",
-        cascade="all, delete-orphan",
+        passive_deletes="all",
     )
 
     # No delete cascade: adjustments are financial history.
@@ -141,6 +143,10 @@ class Payment(Base):
     cashier module (Stage 3) have no user, shift or confirmation; every
     later row has them, and its business day (ck_payments_recorded_in_shift,
     NOT VALID).
+
+    Payments are append-only (never updated or deleted, migration
+    f2a8c6e4b1d9) and can be written only into an OPEN shift of an OPEN
+    business day: database triggers refuse anything else.
     """
 
     __tablename__ = "payments"

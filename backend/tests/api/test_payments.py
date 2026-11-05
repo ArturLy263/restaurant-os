@@ -7,7 +7,7 @@ import pytest
 
 from app.db.models.bill import Bill, Payment
 from app.db.models.order import Order
-from tests.factories import auth_headers
+from tests.factories import auth_headers, with_idempotency_key
 
 
 @pytest.fixture
@@ -65,7 +65,7 @@ def pay(db_client, bill, headers):
         return db_client.post(
             f"/api/v1/bills/{bill['id']}/payments",
             json=body,
-            headers=headers,
+            headers=with_idempotency_key(headers),
         )
 
     return _pay

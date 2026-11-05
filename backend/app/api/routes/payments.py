@@ -3,7 +3,10 @@ import uuid
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
-from app.api.idempotency import IDEMPOTENT_ROUTE_RESPONSES, Idempotency
+from app.api.idempotency import (
+    REQUIRED_IDEMPOTENCY_ROUTE_RESPONSES,
+    RequiredIdempotency,
+)
 from app.core.dependencies import require_permission
 from app.core.permissions import Permission
 from app.db.dependencies import get_db
@@ -21,7 +24,7 @@ router = APIRouter(
     "/{payment_id}/refunds",
     response_model=RefundResponse,
     status_code=status.HTTP_201_CREATED,
-    responses=IDEMPOTENT_ROUTE_RESPONSES,
+    responses=REQUIRED_IDEMPOTENCY_ROUTE_RESPONSES,
 )
 def refund_payment(
     payment_id: uuid.UUID,
@@ -30,11 +33,13 @@ def refund_payment(
     current_user: User = Depends(
         require_permission(Permission.PAYMENTS_REFUND)
     ),
-    idempotency: Idempotency = Depends(),
+    idempotency: RequiredIdempotency = Depends(),
 ):
-    """Return money for a payment the way it was paid, in the open shift.
-    A card refund is run on the external terminal and confirmed here
-    (card_confirmed); the payment and its bill are kept unchanged."""
+    """Return money for a payment of a settled (PAID) bill, the way it was
+    paid, in the open shift; an open bill's payments are refused (409
+    BILL_NOT_SETTLED). A card refund is run on the external terminal and
+    confirmed here (card_confirmed); the payment and its bill are kept
+    unchanged. Needs an Idempotency-Key."""
 
     return idempotency.run(
         lambda: BillService.refund_payment(

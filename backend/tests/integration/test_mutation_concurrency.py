@@ -5,6 +5,8 @@ commits (see tests/concurrency.py for the synchronization). Data is created
 by `committed_restaurants` and deleted afterwards.
 """
 
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -469,7 +471,8 @@ def test_service_committing_directly_cannot_split_an_idempotent_request(
 
     Simulates that regression in the payment service: with a key, the
     direct commit is refused, so neither the payment nor a key without its
-    response is persisted; without a key, the same code commits as usual.
+    response is persisted; without a key, the payment is refused before the
+    service runs at all (keys are mandatory for payments since Stage 3.1).
     """
 
     monkeypatch.setattr(bill_service, "commit", lambda db: db.commit())
@@ -489,8 +492,9 @@ def test_service_committing_directly_cannot_split_an_idempotent_request(
 
     plain = live.post(path, json=body)
 
-    assert plain.status_code == 201
-    assert live.payments(bill_id) == 1
+    assert plain.status_code == 428, plain.text
+    assert plain.json()["error"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+    assert live.payments(bill_id) == 0
 
 
 def test_preparation_transition_waits_for_a_queued_cancellation(db_engine, live):
@@ -583,7 +587,7 @@ def test_discard_queued_before_the_final_payment_sees_an_open_order(
         ("POST", f"/api/v1/preparations/{preparation_id}/discard",
          {"json": {"reason": "Guest left"}, "headers": live.headers()}),
         ("POST", f"/api/v1/bills/{bill_id}/payments",
-         {"json": {"amount": "15.00", "method": "CASH"}, "headers": live.headers()}),
+         {"json": {"amount": "15.00", "method": "CASH"}, "headers": live.headers(str(uuid.uuid4()))}),
     )
 
     assert discarded.status_code == 409
@@ -603,7 +607,7 @@ def test_discard_queued_after_the_final_payment_sees_it_committed(db_engine, liv
         db_engine,
         order_id,
         ("POST", f"/api/v1/bills/{bill_id}/payments",
-         {"json": {"amount": "15.00", "method": "CASH"}, "headers": live.headers()}),
+         {"json": {"amount": "15.00", "method": "CASH"}, "headers": live.headers(str(uuid.uuid4()))}),
         ("POST", f"/api/v1/preparations/{preparation_id}/discard",
          {"json": {"reason": "Guest left"}, "headers": live.headers()}),
     )
@@ -622,6 +626,7 @@ def test_serve_queued_after_a_discard_cannot_revive_the_preparation(
     paid = live.post(
         f"/api/v1/bills/{bill_id}/payments",
         json={"amount": "15.00", "method": "CASH"},
+        key=str(uuid.uuid4()),
     )
     assert paid.status_code == 201, paid.text
 

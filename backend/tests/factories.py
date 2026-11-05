@@ -97,6 +97,13 @@ def create_order(db: Session, restaurant, status: str = "OPEN") -> Order:
     return order
 
 
+def with_idempotency_key(headers: dict, key: str | None = None) -> dict:
+    """`headers` plus an Idempotency-Key (a fresh one unless given): money
+    and cash register operations refuse requests without one."""
+
+    return {**headers, "Idempotency-Key": key or str(uuid.uuid4())}
+
+
 def auth_headers(user: User) -> dict[str, str]:
     token = create_access_token(
         user_id=user.id,

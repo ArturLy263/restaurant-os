@@ -2,8 +2,10 @@
 shifts and handovers, payments (cash, manual card, tips, splits), refunds
 and reports (docs/stage-3-cashier-plan.md)."""
 
-from datetime import date
+import uuid
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import select
@@ -15,11 +17,12 @@ from app.db.models.outbox_event import OutboxEvent
 from app.db.models.product import Product
 from tests.factories import auth_headers, create_restaurant, create_user
 
+# Till.call sends a fresh Idempotency-Key with every POST by default.
+AUTO_KEY = object()
+
 # These tests open business days and shifts themselves.
 CASH_REGISTER_CLOSED = True
 
-DAY_1 = "2026-10-31"
-DAY_2 = "2026-11-01"
 
 
 class Till:
@@ -33,6 +36,12 @@ class Till:
         self.cashier = create_user(db, restaurant, "CASHIER")
         self.cashier2 = create_user(db, restaurant, "CASHIER")
         self.waiter = create_user(db, restaurant, "WAITER")
+        # Business days are dated yesterday (DAY_1) and today (DAY_2) in
+        # the restaurant's time zone: the dates a cashier may open.
+        today = datetime.now(ZoneInfo(restaurant.restaurant.timezone)).date()
+        self.today = today
+        self.DAY_1 = (today - timedelta(days=1)).isoformat()
+        self.DAY_2 = today.isoformat()
         self.burger = restaurant.product  # 12.50
         self.salad = Product(
             category_id=restaurant.category.id,
@@ -41,10 +50,18 @@ class Till:
             station_id=restaurant.station.id,
         )
         db.add(self.salad)
-        db.flush()
+        # Release the savepoint: a refused idempotent request rolls back
+        # to here, never past the set-up (the test's outer transaction
+        # still discards everything).
+        db.commit()
 
-    def call(self, method, path, user=None, json=None, key=None):
+    def call(self, method, path, user=None, json=None, key=AUTO_KEY):
+        """`key`: a fresh Idempotency-Key for every POST unless given;
+        None sends none."""
+
         headers = auth_headers(user or self.cashier)
+        if key is AUTO_KEY:
+            key = str(uuid.uuid4()) if method == "POST" else None
         if key:
             headers["Idempotency-Key"] = key
         return self.client.request(method, path, json=json, headers=headers)
@@ -60,8 +77,9 @@ class Till:
 
     # --- set-up ---
 
-    def open_day(self, business_date=DAY_2, user=None):
-        return self.ok(self.call("POST", "/api/v1/business-days", user, {"business_date": business_date}), 201)
+    def open_day(self, business_date=None, user=None):
+        body = {"business_date": business_date or self.DAY_2}
+        return self.ok(self.call("POST", "/api/v1/business-days", user, body), 201)
 
     def open_shift(self, amount="100.00", reason=None, user=None):
         body = {"opening_amount": amount}
@@ -76,7 +94,15 @@ class Till:
         return self.call("POST", f"/api/v1/cash/shifts/{shift_id}/close", user, body)
 
     def register(self, user=None):
-        return self.ok(self.call("GET", "/api/v1/cash/register", user))
+        """The register as the manager by default (cashiers count blind
+        and see no expected cash)."""
+
+        return self.ok(self.call("GET", "/api/v1/cash/register", user or self.manager))
+
+    def shift_view(self, shift_id, user=None):
+        """A shift as the manager by default (with its expected cash)."""
+
+        return self.ok(self.call("GET", f"/api/v1/cash/shifts/{shift_id}", user or self.manager))
 
     def billed_order(self, *products, table=None):
         """An order of `products` (default one burger), sent and billed."""
@@ -100,7 +126,7 @@ class Till:
         bill = self.ok(self.call("POST", f"/api/v1/bills/order/{order['id']}"), 201)
         return order, items, bill
 
-    def pay(self, bill_id, amount, method="CASH", user=None, key=None, **extra):
+    def pay(self, bill_id, amount, method="CASH", user=None, key=AUTO_KEY, **extra):
         body = {"amount": amount, "method": method, **extra}
         if method == "CARD":
             body.setdefault("card_confirmed", True)
@@ -146,15 +172,15 @@ def test_orders_need_no_business_day_but_payments_need_a_day_and_a_shift(till):
 
 
 def test_one_open_day_and_one_open_shift_at_a_time(till):
-    day = till.open_day(DAY_2)
-    till.error(till.call("POST", "/api/v1/business-days", json={"business_date": "2026-11-02"}), 409, "BUSINESS_DAY_ALREADY_OPEN")
+    day = till.open_day(till.DAY_2)
+    till.error(till.call("POST", "/api/v1/business-days", json={"business_date": till.DAY_2}), 409, "BUSINESS_DAY_ALREADY_OPEN")
     shift = till.ok(till.open_shift(), 201)
     till.error(till.open_shift(user=till.cashier2), 409, "CASH_SHIFT_ALREADY_OPEN")
 
     till.ok(till.close_shift(shift["id"], "100.00"))
     till.ok(till.call("POST", f"/api/v1/business-days/{day['id']}/close", till.manager))
     # A closed day is never reopened.
-    till.error(till.call("POST", "/api/v1/business-days", json={"business_date": DAY_2}), 409, "BUSINESS_DAY_EXISTS")
+    till.error(till.call("POST", "/api/v1/business-days", json={"business_date": till.DAY_2}), 409, "BUSINESS_DAY_EXISTS")
 
 
 def test_several_cashiers_work_one_shift_and_each_is_recorded(open_till):
@@ -191,16 +217,26 @@ def test_closing_needs_an_explanation_for_a_difference(open_till):
     _, _, bill = till.billed_order()
     till.ok(till.pay(bill["id"], "12.50"), 201)
 
-    till.error(till.close_shift(till.shift["id"], "110.00"), 422, "CLOSING_EXPLANATION_REQUIRED")
+    refused = till.error(till.close_shift(till.shift["id"], "110.00"), 422, "CLOSING_EXPLANATION_REQUIRED")
+    # Blind count: the refusal doesn't say what was expected.
+    assert "112.50" not in refused["message"] and "2.50" not in refused["message"]
     closed = till.ok(till.close_shift(till.shift["id"], "110.00", "Short 2.50, unclear"))
 
+    # The cashier sees their own count, never the expected cash...
     assert closed["closing"] == {
-        "expected_amount": "112.50",
+        "expected_amount": None,
         "counted_amount": "110.00",
-        "difference": "-2.50",
+        "difference": None,
         "explanation": "Short 2.50, unclear",
         "user": {"id": str(till.cashier.id), "name": till.cashier.name},
         "created_at": closed["closing"]["created_at"],
+    }
+    assert (closed["expected_cash"], closed["drawer"], closed["expected_visible"]) == (None, None, False)
+    # ...the manager sees the whole result.
+    managed = till.shift_view(till.shift["id"])
+    assert managed["expected_visible"] is True
+    assert {k: managed["closing"][k] for k in ("expected_amount", "counted_amount", "difference")} == {
+        "expected_amount": "112.50", "counted_amount": "110.00", "difference": "-2.50",
     }
     till.error(till.close_shift(till.shift["id"], "110.00", "again"), 409, "CASH_SHIFT_NOT_OPEN")
 
@@ -219,7 +255,7 @@ def test_manager_corrects_a_mistyped_opening_amount(open_till):
     second = till.ok(till.call("POST", path, till.manager, {"opening_amount": "140.00", "reason": "Recount"}), 201)
     till.error(till.call("POST", path, till.manager, {"opening_amount": "140.00", "reason": "x"}), 409, "OPENING_AMOUNT_UNCHANGED")
 
-    shift = till.ok(till.call("GET", f"/api/v1/cash/shifts/{shift_id}"))
+    shift = till.shift_view(shift_id)
     assert shift["status"] == "OPEN"
     assert (shift["opening_amount"], shift["effective_opening_amount"], shift["expected_cash"]) == ("100.00", "140.00", "140.00")
     assert [(c["previous_amount"], c["new_amount"]) for c in shift["corrections"]] == [("100.00", "150.00"), ("150.00", "140.00")]
@@ -255,7 +291,7 @@ def test_cash_in_and_out_change_expected_cash_and_never_overdraw(open_till):
     till.error(till.call("POST", path, json={"type": "CASH_IN", "amount": "0", "reason": "x"}), 422, "VALIDATION_ERROR")
     till.error(till.call("POST", path, till.waiter, {"type": "CASH_IN", "amount": "1.00", "reason": "x"}), 403, "PERMISSION_DENIED")
 
-    shift = till.ok(till.call("GET", f"/api/v1/cash/shifts/{till.shift['id']}"))
+    shift = till.shift_view(till.shift['id'])
     assert shift["expected_cash"] == "70.00"
     assert [(m["type"], m["amount"], m["user"]["id"]) for m in shift["movements"]] == [
         ("CASH_IN", "20.00", str(till.cashier.id)),
@@ -307,7 +343,7 @@ def test_tips_are_kept_apart_from_what_is_owed_and_from_revenue(open_till):
     assert report["revenue"] == {"CASH": "10.00", "CARD": "9.80", "total": "19.80"}
     assert report["tips"] == {"CASH": "1.50", "CARD": "2.00", "total": "3.50"}
     # The cash tip went into the drawer, as its own line.
-    drawer = till.ok(till.call("GET", f"/api/v1/cash/shifts/{till.shift['id']}"))["drawer"]
+    drawer = till.shift_view(till.shift['id'])["drawer"]
     assert (drawer["cash_sales"], drawer["cash_tips"], drawer["expected"]) == ("10.00", "1.50", "111.50")
 
 
@@ -414,7 +450,7 @@ def test_refunds_keep_the_payment_and_split_bill_money_from_tips(open_till):
     assert report["net_tips"]["total"] == "0.00"
     assert report["refunds"]["CASH"] == "12.50" and report["refunded_tips"]["CASH"] == "2.00"
     # Cash left the drawer: 100 + 12.50 + 2.00 tip - 14.50 refunded.
-    assert till.ok(till.call("GET", f"/api/v1/cash/shifts/{till.shift['id']}"))["expected_cash"] == "100.00"
+    assert till.shift_view(till.shift['id'])["expected_cash"] == "100.00"
 
 
 def test_card_refunds_are_confirmed_by_hand_and_cash_refunds_need_cash(open_till):
@@ -426,7 +462,7 @@ def test_card_refunds_are_confirmed_by_hand_and_cash_refunds_need_cash(open_till
     refund = till.ok(till.refund(card["id"], "12.50", card_confirmed=True, external_reference="RFND-1"), 201)
     assert (refund["method"], refund["confirmation_method"]) == ("CARD", "MANUAL_CARD_TERMINAL")
     # A card refund doesn't touch the drawer.
-    assert till.ok(till.call("GET", f"/api/v1/cash/shifts/{till.shift['id']}"))["expected_cash"] == "100.00"
+    assert till.shift_view(till.shift['id'])["expected_cash"] == "100.00"
 
     _, _, bill2 = till.billed_order(table=_second_table(till))
     cash = till.ok(till.pay(bill2["id"], "12.50"), 201)
@@ -436,7 +472,7 @@ def test_card_refunds_are_confirmed_by_hand_and_cash_refunds_need_cash(open_till
 
 
 def test_a_refund_belongs_to_the_shift_and_day_it_is_made_in(till):
-    day1 = till.open_day(DAY_1)
+    day1 = till.open_day(till.DAY_1)
     shift1 = till.ok(till.open_shift("100.00"), 201)
     _, _, bill = till.billed_order()
     payment = till.ok(till.pay(bill["id"], "12.50"), 201)
@@ -444,15 +480,15 @@ def test_a_refund_belongs_to_the_shift_and_day_it_is_made_in(till):
     till.ok(till.call("POST", f"/api/v1/business-days/{day1['id']}/close", till.manager))
     frozen = till.day_report(day1["id"])
 
-    day2 = till.open_day(DAY_2)
-    shift2 = till.ok(till.open_shift("112.50"), 201)
+    day2 = till.open_day(till.DAY_2)
+    shift2 = till.ok(till.open_shift("112.50", user=till.cashier2), 201)
     refund = till.ok(till.refund(payment["id"], "2.50"), 201)
 
     assert (refund["cash_shift_id"], refund["business_day_id"]) == (shift2["id"], day2["id"])
     assert till.day_report(day1["id"]) == frozen
     assert frozen["revenue"]["total"] == "12.50"
     assert till.day_report(day2["id"])["revenue"]["total"] == "-2.50"
-    assert till.ok(till.call("GET", f"/api/v1/cash/shifts/{shift2['id']}"))["expected_cash"] == "110.00"
+    assert till.shift_view(shift2['id'])["expected_cash"] == "110.00"
 
 
 # --- Handovers ---
@@ -489,13 +525,20 @@ def test_handover_discrepancy_is_recorded_with_its_reason(open_till, received, d
     incoming = till.ok(till.open_shift(received, "Recounted twice", user=till.cashier2), 201)
 
     handover = incoming["handover"]
+    # The incoming cashier sees the counts (theirs is in), not the
+    # outgoing shift's expected cash.
     assert (
         handover["previous_expected_amount"], handover["handed_over_amount"],
         handover["received_amount"], handover["difference"], handover["reason"],
-    ) == ("150.00", "150.00", received, difference, "Recounted twice")
+    ) == (None, "150.00", received, difference, "Recounted twice")
+    assert (handover["outgoing_user"]["id"], handover["incoming_user"]["id"], handover["self_confirmed"]) == (
+        str(till.cashier.id), str(till.cashier2.id), False,
+    )
+    assert till.shift_view(incoming["id"])["handover"]["previous_expected_amount"] == "150.00"
     # The new shift opens with what was received; no movement, nothing
     # else changes, and payments go on.
-    assert (incoming["opening_amount"], incoming["expected_cash"], incoming["movements"]) == (received, received, [])
+    incoming_view = till.shift_view(incoming["id"])
+    assert (incoming["opening_amount"], incoming_view["expected_cash"], incoming["movements"]) == (received, received, [])
     assert till.db.scalar(select(CashMovement).where(CashMovement.cash_shift_id == incoming["id"])) is None
     _, _, bill2 = till.billed_order(table=_second_table(till))
     till.ok(till.pay(bill2["id"], "12.50", user=till.cashier2), 201)
@@ -503,19 +546,21 @@ def test_handover_discrepancy_is_recorded_with_its_reason(open_till, received, d
     assert report["handover_difference_total"] == difference
     assert report["revenue"]["total"] == "25.00"
     assert [h["difference"] for h in report["handovers"]] == [difference]
-    assert till.ok(till.call("GET", "/api/v1/cash/handovers"))[0]["id"] == handover["id"]
+    listed = till.ok(till.call("GET", "/api/v1/cash/handovers"))[0]
+    assert (listed["id"], listed["previous_expected_amount"]) == (handover["id"], None)
+    assert till.ok(till.call("GET", "/api/v1/cash/handovers", till.manager))[0]["previous_expected_amount"] == "150.00"
     event = till.db.scalar(select(OperationalEvent).where(OperationalEvent.event_type == "cash_shift.handover_recorded"))
     assert event.event_metadata["difference"] == difference
 
 
 def test_cross_day_handover_belongs_to_the_new_day_and_leaves_the_old_report(till):
-    day1 = till.open_day(DAY_1)
+    day1 = till.open_day(till.DAY_1)
     shift1 = till.ok(till.open_shift("100.00"), 201)
     till.ok(till.close_shift(shift1["id"], "150.00", "Found 50 extra"))
     till.ok(till.call("POST", f"/api/v1/business-days/{day1['id']}/close", till.manager))
     frozen = till.day_report(day1["id"])
 
-    day2 = till.open_day(DAY_2)
+    day2 = till.open_day(till.DAY_2)
     shift2 = till.ok(till.open_shift("130.00", "Only 130 in the drawer", user=till.cashier2), 201)
 
     handover = shift2["handover"]
@@ -523,21 +568,26 @@ def test_cross_day_handover_belongs_to_the_new_day_and_leaves_the_old_report(til
     assert till.day_report(day1["id"]) == frozen and frozen["handovers"] == []
     report2 = till.day_report(day2["id"])
     assert [(h["handed_over_amount"], h["received_amount"]) for h in report2["handovers"]] == [("150.00", "130.00")]
-    assert shift2["expected_cash"] == "130.00"
+    assert till.shift_view(shift2["id"])["expected_cash"] == "130.00"
+    assert (handover["outgoing_user"]["id"], handover["incoming_user"]["id"]) == (str(till.cashier.id), str(till.cashier2.id))
 
 
 def test_consecutive_handovers_chain_and_reports_count_nothing_twice(open_till):
     till = open_till
     totals = []
     # Three shifts in one day, each taking one 12.50 cash payment.
-    for counted, received, cashier in (("112.50", "110.00", till.cashier2), ("122.50", "122.50", till.cashier)):
+    # Cashier 1 hands over to cashier 2, who hands back to cashier 1.
+    for outgoing, incoming, counted, received in (
+        (till.cashier, till.cashier2, "112.50", "110.00"),
+        (till.cashier2, till.cashier, "122.50", "122.50"),
+    ):
         _, _, bill = till.billed_order()
-        till.ok(till.pay(bill["id"], "12.50"), 201)
+        till.ok(till.pay(bill["id"], "12.50", user=outgoing), 201)
         shift = till.register()["shift"]
         totals.append(shift["expected_cash"])
-        till.ok(till.close_shift(shift["id"], counted, None if counted == shift["expected_cash"] else "x"))
+        till.ok(till.close_shift(shift["id"], counted, None if counted == shift["expected_cash"] else "x", user=outgoing))
         reason = None if received == counted else "short"
-        till.ok(till.open_shift(received, reason, user=cashier), 201)
+        till.ok(till.open_shift(received, reason, user=incoming), 201)
     _, _, bill = till.billed_order()
     till.ok(till.pay(bill["id"], "12.50"), 201)
     last = till.register()["shift"]
@@ -550,26 +600,36 @@ def test_consecutive_handovers_chain_and_reports_count_nothing_twice(open_till):
         (Decimal("122.50"), Decimal("122.50"), Decimal("0.00")),
     ]
     assert handovers[0].to_shift_id == handovers[1].from_shift_id
+    assert [(h.outgoing_user_id, h.incoming_user_id) for h in handovers] == [
+        (till.cashier.id, till.cashier2.id), (till.cashier2.id, till.cashier.id),
+    ]
     report = till.day_report(till.day["id"])
     assert report["revenue"] == {"CASH": "37.50", "CARD": "0.00", "total": "37.50"}
     assert len(report["shifts"]) == 3 and report["handover_difference_total"] == "-2.50"
     assert sum(Decimal(s["revenue"]["total"]) for s in report["shifts"]) == Decimal("37.50")
 
 
-def test_atomic_handover_leaves_no_moment_without_a_shift(open_till):
+def test_two_party_handover_identifies_both_cashiers(open_till):
+    """Step 1: the outgoing cashier counts and closes; step 2: the
+    incoming cashier counts what they received and opens. The former
+    one-step body is refused."""
+
     till = open_till
     _, _, bill = till.billed_order()
     till.ok(till.pay(bill["id"], "12.50"), 201)
     path = f"/api/v1/cash/shifts/{till.shift['id']}/handover"
 
-    till.error(till.call("POST", path, till.cashier2, {"counted_amount": "112.50", "received_amount": "110.00"}), 422, "HANDOVER_REASON_REQUIRED")
+    till.error(till.call("POST", path, till.cashier, {"counted_amount": "112.50", "received_amount": "110.00"}), 422, "VALIDATION_ERROR")
     assert till.register()["shift"]["id"] == till.shift["id"]  # nothing changed
-    incoming = till.ok(till.call("POST", path, till.cashier2, {
-        "counted_amount": "112.50", "received_amount": "110.00", "handover_reason": "2.50 short",
-    }), 201)
+    closed = till.ok(till.call("POST", path, till.cashier, {"counted_amount": "112.50"}))
+    assert (closed["status"], closed["closing"]["user"]["id"]) == ("CLOSED", str(till.cashier.id))
 
-    assert incoming["handover"]["from_shift_id"] == till.shift["id"]
-    assert till.ok(till.call("GET", f"/api/v1/cash/shifts/{till.shift['id']}"))["status"] == "CLOSED"
+    incoming = till.ok(till.open_shift("110.00", "2.50 short", user=till.cashier2), 201)
+    handover = incoming["handover"]
+    assert (handover["from_shift_id"], handover["to_shift_id"]) == (till.shift["id"], incoming["id"])
+    assert (handover["outgoing_user"]["id"], handover["incoming_user"]["id"]) == (str(till.cashier.id), str(till.cashier2.id))
+    assert (handover["handed_over_amount"], handover["received_amount"], handover["difference"]) == ("112.50", "110.00", "-2.50")
+    assert (incoming["opening_amount"], incoming["opened_by"]["id"]) == ("110.00", str(till.cashier2.id))
     assert till.register()["shift"]["id"] == incoming["id"]
 
 
@@ -639,6 +699,9 @@ def test_another_restaurants_cash_records_look_missing(open_till, db_session, db
     payment = till.ok(till.pay(bill["id"], "12.50"), 201)
     other = create_restaurant(db_session, "Other")
     stranger = create_user(db_session, other, "MANAGER")
+    # Keep them when a refused idempotent request rolls back its savepoint
+    # (the test's outer transaction still discards everything).
+    db_session.commit()
 
     for method, path, body in (
         ("GET", f"/api/v1/bills/{bill['id']}", None),

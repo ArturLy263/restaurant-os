@@ -3,9 +3,18 @@ lines and payments, a cash shift with its drawer.
 
 Read only; amounts are Decimal (serialized as Money strings by the
 response models). Every query is scoped by the restaurant.
+
+Blind count: a cash shift's figures depend on who looks (`CashViewer`).
+Without cash_drawer:view_expected (cashiers) the expected cash, the
+drawer breakdown it is summed from, closing differences and handovers'
+previous expected amounts are null; a closing's count is null too while
+its handover is pending, except for the employee who counted it, so the
+incoming cashier can't learn what to "find" before counting. Managers
+see everything.
 """
 
 import uuid
+from dataclasses import dataclass
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -29,6 +38,15 @@ from app.services.order_service import ACTIVE_ORDER_STATUSES
 
 ZERO = Decimal("0.00")
 SETTLED_LIMIT = 50
+
+
+@dataclass(frozen=True)
+class CashViewer:
+    """Who looks at cash figures: the user and whether they may see
+    expected cash (Permission.CASH_DRAWER_VIEW_EXPECTED)."""
+
+    user_id: uuid.UUID
+    sees_expected: bool
 
 
 def _user(names: dict, user_id) -> dict | None:
@@ -186,29 +204,51 @@ def bill_detail(db: Session, restaurant_id: uuid.UUID, bill_id: uuid.UUID) -> di
     }
 
 
-def _handover(handover: CashShiftHandover, names: dict) -> dict:
+def _handover(handover: CashShiftHandover, names: dict, viewer: CashViewer) -> dict:
+    # A handover exists only once the incoming cashier has counted, so its
+    # counts are no longer secret; the previous expected cash still is.
     return {
         **{field: getattr(handover, field) for field in (
             "id", "cash_register_id", "business_day_id", "from_shift_id", "to_shift_id",
-            "previous_expected_amount", "handed_over_amount", "received_amount", "difference",
-            "reason", "created_at",
+            "handed_over_amount", "received_amount", "difference", "reason", "created_at",
         )},
+        "previous_expected_amount": (
+            handover.previous_expected_amount if viewer.sees_expected else None
+        ),
         "outgoing_user": _user(names, handover.outgoing_user_id),
         "incoming_user": _user(names, handover.incoming_user_id),
+        "self_confirmed": handover.outgoing_user_id == handover.incoming_user_id,
     }
 
 
-def handovers(db: Session, rows: list[CashShiftHandover]) -> list[dict]:
+def handovers(db: Session, rows: list[CashShiftHandover], viewer: CashViewer) -> list[dict]:
     names = cash_ledger.user_names(
         db, [h.outgoing_user_id for h in rows] + [h.incoming_user_id for h in rows]
     )
-    return [_handover(h, names) for h in rows]
+    return [_handover(h, names, viewer) for h in rows]
 
 
-def shift_detail(db: Session, shift: CashShift) -> dict:
+def _handover_pending(db: Session, shift_id: uuid.UUID) -> bool:
+    """Whether the closed shift's cash still waits for the next count."""
+
+    return db.scalar(
+        select(CashShiftHandover.id).where(CashShiftHandover.from_shift_id == shift_id)
+    ) is None
+
+
+def _count_visible(db: Session, closing: CashShiftClosing, viewer: CashViewer) -> bool:
+    return (
+        viewer.sees_expected
+        or closing.user_id == viewer.user_id
+        or not _handover_pending(db, closing.cash_shift_id)
+    )
+
+
+def shift_detail(db: Session, shift: CashShift, viewer: CashViewer) -> dict:
     drawer = cash_ledger.drawer(db, shift)
     closing = db.scalar(select(CashShiftClosing).where(CashShiftClosing.cash_shift_id == shift.id))
     handover = db.scalar(select(CashShiftHandover).where(CashShiftHandover.to_shift_id == shift.id))
+    expected = viewer.sees_expected
     names = cash_ledger.user_names(
         db,
         [shift.opened_by_user_id]
@@ -228,8 +268,13 @@ def shift_detail(db: Session, shift: CashShift) -> dict:
         "opened_by": _user(names, shift.opened_by_user_id),
         "opened_at": shift.opened_at,
         "closed_at": shift.closed_at,
-        "expected_cash": closing.expected_amount if closing else drawer.expected,
-        "drawer": closing.summary["drawer"] if closing else drawer.as_report(),
+        "expected_cash": (
+            (closing.expected_amount if closing else drawer.expected) if expected else None
+        ),
+        "drawer": (
+            (closing.summary["drawer"] if closing else drawer.as_report()) if expected else None
+        ),
+        "expected_visible": expected,
         "corrections": [
             {
                 "id": c.id,
@@ -256,12 +301,14 @@ def shift_detail(db: Session, shift: CashShift) -> dict:
             }
             for m in shift.movements
         ],
-        "handover": _handover(handover, names) if handover else None,
+        "handover": _handover(handover, names, viewer) if handover else None,
         "closing": (
             {
-                "expected_amount": closing.expected_amount,
-                "counted_amount": closing.counted_amount,
-                "difference": closing.difference,
+                "expected_amount": closing.expected_amount if expected else None,
+                "counted_amount": (
+                    closing.counted_amount if _count_visible(db, closing, viewer) else None
+                ),
+                "difference": closing.difference if expected else None,
                 "explanation": closing.explanation,
                 "user": _user(names, closing.user_id),
                 "created_at": closing.created_at,
@@ -272,7 +319,7 @@ def shift_detail(db: Session, shift: CashShift) -> dict:
     }
 
 
-def register_view(db: Session, restaurant_id: uuid.UUID) -> dict:
+def register_view(db: Session, restaurant_id: uuid.UUID, viewer: CashViewer) -> dict:
     repository = CashRepository(db)
     register = repository.active_register(restaurant_id)
     day = db.scalar(
@@ -292,14 +339,17 @@ def register_view(db: Session, restaurant_id: uuid.UUID) -> dict:
         previous_closing = {
             "cash_shift_id": previous.id,
             "business_day_id": previous.business_day_id,
-            "expected_amount": closing.expected_amount,
-            "counted_amount": closing.counted_amount,
+            "expected_amount": closing.expected_amount if viewer.sees_expected else None,
+            "counted_amount": (
+                closing.counted_amount if _count_visible(db, closing, viewer) else None
+            ),
             "closed_at": previous.closed_at,
             "closed_by": _user(names, closing.user_id),
+            "handover_pending": _handover_pending(db, previous.id),
         }
     return {
         "register_id": register.id if register else None,
         "business_day": day,
-        "shift": shift_detail(db, shift) if shift else None,
+        "shift": shift_detail(db, shift, viewer) if shift else None,
         "previous_closing": previous_closing,
     }

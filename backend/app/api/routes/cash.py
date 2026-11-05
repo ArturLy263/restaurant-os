@@ -6,9 +6,13 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.idempotency import IDEMPOTENT_ROUTE_RESPONSES, Idempotency
+from app.api.idempotency import (
+    IDEMPOTENT_ROUTE_RESPONSES,
+    REQUIRED_IDEMPOTENCY_ROUTE_RESPONSES,
+    Idempotency,
+    RequiredIdempotency,
+)
 from app.core.dependencies import AuthContext, get_auth_context, require_permission
-from app.core.errors import ApiError, ErrorCode
 from app.core.permissions import Permission
 from app.db.dependencies import get_db
 from app.db.models.cash import BusinessDay
@@ -30,6 +34,14 @@ from app.schemas.cash import (
 )
 from app.services import cashier_views
 from app.services.cash_service import CashService
+from app.services.cashier_views import CashViewer
+
+
+def _viewer(auth: AuthContext) -> CashViewer:
+    return CashViewer(
+        user_id=auth.user.id,
+        sees_expected=Permission.CASH_DRAWER_VIEW_EXPECTED in auth.permissions,
+    )
 
 business_days_router = APIRouter(
     prefix="/api/v1/business-days",
@@ -55,14 +67,21 @@ def open_business_day(
     request: OpenBusinessDayRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.BUSINESS_DAYS_OPEN)),
+    auth: AuthContext = Depends(get_auth_context),
     idempotency: Idempotency = Depends(),
 ):
+    """Open the next business day, dated today (restaurant time) unless
+    `business_date` is given: yesterday is allowed (a day opened after
+    midnight), never the future, always after the latest day; earlier
+    dates need business_days:open_past (403 otherwise)."""
+
     return idempotency.run(
         lambda: CashService.open_business_day(
             db=db,
             restaurant_id=current_user.restaurant_id,
             user_id=current_user.id,
             business_date=request.business_date,
+            may_open_past=Permission.BUSINESS_DAYS_OPEN_PAST in auth.permissions,
         ),
         payload=request,
     )
@@ -139,28 +158,37 @@ def business_day_report(
 def get_register(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.CASH_SHIFTS_VIEW)),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """The open business day, the open shift with its drawer, and the
-    previous shift's closing (what the next cashier should receive)."""
+    previous shift's closing (what the next cashier should receive).
+    Expected cash only with cash_drawer:view_expected (blind count)."""
 
-    return cashier_views.register_view(db, current_user.restaurant_id)
+    return cashier_views.register_view(db, current_user.restaurant_id, _viewer(auth))
 
 
 @router.post(
     "/shifts",
     response_model=CashShiftResponse,
     status_code=status.HTTP_201_CREATED,
-    responses=IDEMPOTENT_ROUTE_RESPONSES,
+    responses=REQUIRED_IDEMPOTENCY_ROUTE_RESPONSES,
 )
 def open_shift(
     request: OpenShiftRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.CASH_SHIFTS_OPEN)),
-    idempotency: Idempotency = Depends(),
+    auth: AuthContext = Depends(get_auth_context),
+    idempotency: RequiredIdempotency = Depends(),
 ):
-    """Open the register's shift with the cash counted. If it differs from
-    the previous shift's count, `handover_reason` is required; the
-    difference is recorded as a handover, never as a cash movement."""
+    """Open the register's shift with the cash counted (blind).
+
+    After a closed shift this is step 2 of the handover: the incoming
+    cashier confirms the cash physically received, which becomes the
+    opening amount. If it differs from the previous shift's count,
+    `handover_reason` is required; the difference is recorded on the
+    handover (in this business day), never as a cash movement. The
+    employee who closed the previous shift can't confirm it (409
+    HANDOVER_SAME_USER) without cash_handovers:self_confirm."""
 
     def run():
         shift = CashService.open_shift(
@@ -169,8 +197,9 @@ def open_shift(
             user_id=current_user.id,
             opening_amount=request.opening_amount,
             handover_reason=request.handover_reason,
+            may_self_confirm=Permission.CASH_HANDOVERS_SELF_CONFIRM in auth.permissions,
         )
-        return cashier_views.shift_detail(db, CashService.get_shift(db, current_user.restaurant_id, shift.id))
+        return cashier_views.shift_detail(db, CashService.get_shift(db, current_user.restaurant_id, shift.id), _viewer(auth))
 
     return idempotency.run(run, payload=request)
 
@@ -183,21 +212,23 @@ def get_shift(
     shift_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.CASH_SHIFTS_VIEW)),
+    auth: AuthContext = Depends(get_auth_context),
 ):
-    return cashier_views.shift_detail(db, CashService.get_shift(db, current_user.restaurant_id, shift_id))
+    return cashier_views.shift_detail(db, CashService.get_shift(db, current_user.restaurant_id, shift_id), _viewer(auth))
 
 
 @router.post(
     "/shifts/{shift_id}/close",
     response_model=CashShiftResponse,
-    responses=IDEMPOTENT_ROUTE_RESPONSES,
+    responses=REQUIRED_IDEMPOTENCY_ROUTE_RESPONSES,
 )
 def close_shift(
     shift_id: uuid.UUID,
     request: CloseShiftRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.CASH_SHIFTS_CLOSE)),
-    idempotency: Idempotency = Depends(),
+    auth: AuthContext = Depends(get_auth_context),
+    idempotency: RequiredIdempotency = Depends(),
 ):
     """Close the shift with the cash counted; `explanation` is required
     when it differs from the expected cash. Orders, tables, bills and the
@@ -212,7 +243,7 @@ def close_shift(
             counted_amount=request.counted_amount,
             explanation=request.explanation,
         )
-        return cashier_views.shift_detail(db, CashService.get_shift(db, current_user.restaurant_id, shift_id))
+        return cashier_views.shift_detail(db, CashService.get_shift(db, current_user.restaurant_id, shift_id), _viewer(auth))
 
     return idempotency.run(run, payload=request)
 
@@ -220,8 +251,7 @@ def close_shift(
 @router.post(
     "/shifts/{shift_id}/handover",
     response_model=CashShiftResponse,
-    status_code=status.HTTP_201_CREATED,
-    responses=IDEMPOTENT_ROUTE_RESPONSES,
+    responses=REQUIRED_IDEMPOTENCY_ROUTE_RESPONSES,
 )
 def hand_over_shift(
     shift_id: uuid.UUID,
@@ -229,31 +259,25 @@ def hand_over_shift(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.CASH_SHIFTS_CLOSE)),
     auth: AuthContext = Depends(get_auth_context),
-    idempotency: Idempotency = Depends(),
+    idempotency: RequiredIdempotency = Depends(),
 ):
-    """Close this shift and open the next one (the current user's) in one
-    transaction; returns the new shift. Needs cash_shifts:close and
-    cash_shifts:open."""
-
-    if Permission.CASH_SHIFTS_OPEN not in auth.permissions:
-        raise ApiError(
-            status_code=status.HTTP_403_FORBIDDEN,
-            code=ErrorCode.PERMISSION_DENIED,
-            message=f"Missing permission: {Permission.CASH_SHIFTS_OPEN}",
-        )
+    """Step 1 of a two-party handover: the outgoing cashier counts the
+    drawer and closes the shift under their own name; returns the closed
+    shift. Step 2 is the incoming cashier opening the next shift
+    (POST /cash/shifts) with the cash they received, under their own name.
+    Until then payments are refused. The former one-step body
+    (`received_amount`, `handover_reason`) is refused (422)."""
 
     def run():
-        shift = CashService.hand_over(
+        CashService.hand_over(
             db=db,
             restaurant_id=current_user.restaurant_id,
             user_id=current_user.id,
             shift_id=shift_id,
             counted_amount=request.counted_amount,
             closing_explanation=request.closing_explanation,
-            received_amount=request.received_amount,
-            handover_reason=request.handover_reason,
         )
-        return cashier_views.shift_detail(db, CashService.get_shift(db, current_user.restaurant_id, shift.id))
+        return cashier_views.shift_detail(db, CashService.get_shift(db, current_user.restaurant_id, shift_id), _viewer(auth))
 
     return idempotency.run(run, payload=request)
 
@@ -262,14 +286,15 @@ def hand_over_shift(
     "/shifts/{shift_id}/opening-corrections",
     response_model=OpeningCorrectionResponse,
     status_code=status.HTTP_201_CREATED,
-    responses=IDEMPOTENT_ROUTE_RESPONSES,
+    responses=REQUIRED_IDEMPOTENCY_ROUTE_RESPONSES,
 )
 def correct_opening_amount(
     shift_id: uuid.UUID,
     request: OpeningCorrectionRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.CASH_OPENING_BALANCE_CORRECT)),
-    idempotency: Idempotency = Depends(),
+    auth: AuthContext = Depends(get_auth_context),
+    idempotency: RequiredIdempotency = Depends(),
 ):
     """Correct a mistyped opening amount of an open shift (manager). The
     original amount and every correction are kept; no cash movement."""
@@ -297,14 +322,15 @@ def correct_opening_amount(
     "/shifts/{shift_id}/movements",
     response_model=CashMovementResponse,
     status_code=status.HTTP_201_CREATED,
-    responses=IDEMPOTENT_ROUTE_RESPONSES,
+    responses=REQUIRED_IDEMPOTENCY_ROUTE_RESPONSES,
 )
 def record_cash_movement(
     shift_id: uuid.UUID,
     request: CashMovementRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.CASH_MOVEMENTS_CREATE)),
-    idempotency: Idempotency = Depends(),
+    auth: AuthContext = Depends(get_auth_context),
+    idempotency: RequiredIdempotency = Depends(),
 ):
     """Cash really put into (CASH_IN) or taken out of (CASH_OUT) the drawer."""
 
@@ -337,9 +363,10 @@ def list_handovers(
     limit: int = Query(30, ge=1, le=200),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.CASH_SHIFTS_VIEW)),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """The register's handovers, newest first, with their differences."""
 
     return cashier_views.handovers(
-        db, CashService.handovers(db, current_user.restaurant_id, limit)
+        db, CashService.handovers(db, current_user.restaurant_id, limit), _viewer(auth)
     )

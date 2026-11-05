@@ -173,15 +173,33 @@ def test_failed_request_stores_nothing_and_retry_runs_again(pos):
     assert pos.order(order_id).status == "CLOSED"
 
 
-def test_payment_without_a_key_is_not_deduplicated(pos):
-    """Missing key: the request runs exactly as before, every time."""
+def test_payment_without_a_key_is_refused_before_running(pos):
+    """Payments need a key (Stage 3.1): a retry without one could pay
+    twice, so the request is refused before anything is written."""
 
     *_, bill_id = pos.billed_order()
 
-    assert pos.pay(bill_id, "5.00").status_code == 201
-    assert pos.pay(bill_id, "5.00").status_code == 201
+    for _ in range(2):
+        response = pos.client.post(
+            f"/api/v1/bills/{bill_id}/payments",
+            json={"amount": "5.00", "method": "CASH"},
+            headers=pos.headers,
+        )
+        assert response.status_code == 428, response.text
+        assert response.json()["error"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
 
-    assert len(payments(pos, bill_id)) == 2
+    assert payments(pos, bill_id) == []
+    assert stored_keys(pos) == []
+    assert pos.get_bill(bill_id).json()["amount_due"] == "15.00"
+
+
+def test_bill_creation_without_a_key_still_runs(pos):
+    """Non-financial routes keep the key optional."""
+
+    order_id, *_ = pos.sent_order()
+    response = pos.client.post(f"/api/v1/bills/order/{order_id}", headers=pos.headers)
+
+    assert response.status_code == 201, response.text
     assert stored_keys(pos) == []
 
 

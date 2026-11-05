@@ -18,6 +18,8 @@ import pytest
 from app.core.request_id import REQUEST_ID_HEADER
 from app.main import app
 
+from tests.factories import with_idempotency_key
+
 
 @pytest.fixture(scope="module")
 def openapi():
@@ -182,7 +184,7 @@ def test_core_flow_matches_the_published_contracts(pos, openapi):
         pos.client.post(
             f"/api/v1/bills/{bill['id']}/payments",
             json={"amount": "10.00", "method": "CASH"},
-            headers=pos.headers,
+            headers=with_idempotency_key(pos.headers),
         ),
         "post",
         "/api/v1/bills/{bill_id}/payments",
@@ -195,7 +197,7 @@ def test_core_flow_matches_the_published_contracts(pos, openapi):
         pos.client.post(
             f"/api/v1/bills/{bill['id']}/payments",
             json={"amount": "15.00", "method": "CARD", "card_confirmed": True},
-            headers=pos.headers,
+            headers=with_idempotency_key(pos.headers),
         ),
         "post",
         "/api/v1/bills/{bill_id}/payments",
@@ -220,12 +222,28 @@ def test_core_flow_matches_the_published_contracts(pos, openapi):
 def test_core_operation_errors_use_the_error_envelope(pos, path, body, status_code, code):
     if body is None and path.endswith("/items"):
         body = {"product_id": str(pos.burger.id), "quantity": 1}
-    response = pos.client.post(path.format(missing=uuid.uuid4()), json=body, headers=pos.headers)
+    response = pos.client.post(
+        path.format(missing=uuid.uuid4()), json=body, headers=with_idempotency_key(pos.headers)
+    )
 
     assert response.status_code == status_code, response.text
     error = response.json()["error"]
     assert set(error) == {"code", "message", "request_id"}
     assert error["code"] == code
+    assert error["request_id"] == response.headers[REQUEST_ID_HEADER]
+
+
+def test_a_missing_idempotency_key_uses_the_error_envelope(pos):
+    response = pos.client.post(
+        f"/api/v1/bills/{uuid.uuid4()}/payments",
+        json={"amount": "1.00", "method": "CASH"},
+        headers=pos.headers,
+    )
+
+    assert response.status_code == 428, response.text
+    error = response.json()["error"]
+    assert set(error) == {"code", "message", "request_id"}
+    assert error["code"] == "IDEMPOTENCY_KEY_REQUIRED"
     assert error["request_id"] == response.headers[REQUEST_ID_HEADER]
 
 

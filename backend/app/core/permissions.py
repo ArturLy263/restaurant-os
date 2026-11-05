@@ -60,11 +60,18 @@ class Permission(StrEnum):
 
     # Business days and the cash register
     BUSINESS_DAYS_OPEN = "business_days:open"
+    # Open a business day dated earlier than yesterday (restaurant time).
+    BUSINESS_DAYS_OPEN_PAST = "business_days:open_past"
     BUSINESS_DAYS_CLOSE = "business_days:close"
     CASH_SHIFTS_VIEW = "cash_shifts:view"
     CASH_SHIFTS_OPEN = "cash_shifts:open"
     CASH_SHIFTS_CLOSE = "cash_shifts:close"
     CASH_MOVEMENTS_CREATE = "cash_movements:create"
+    # See the drawer's expected cash and count differences (cashiers count
+    # blind: they never see what the drawer should hold).
+    CASH_DRAWER_VIEW_EXPECTED = "cash_drawer:view_expected"
+    # Confirm, as the incoming cashier, a handover one closed oneself.
+    CASH_HANDOVERS_SELF_CONFIRM = "cash_handovers:self_confirm"
     # Fix a mistyped opening amount of an open shift (no cash moves).
     CASH_OPENING_BALANCE_CORRECT = "cash_opening_balance:correct"
     # Shift and business day reports: revenue, tips, refunds, cash.
@@ -106,12 +113,14 @@ _CASHIER = frozenset(
         Permission.ORDERS_VIEW,
         Permission.BILLS_VIEW,
         Permission.BILLS_CREATE,
-        Permission.BILLS_ADJUST,
+        # Not bills:adjust: cancelling billed items and voiding billed
+        # orders lowers what is owed, so it is for management.
         Permission.PAYMENTS_CREATE,
         # Several cashiers share one register: any of them opens the day,
         # opens, hands over and closes shifts, and records cash in/out.
-        # Refunds, opening corrections, closing the day and reports are
-        # for management.
+        # Refunds, opening corrections, closing the day, reports, expected
+        # cash (blind counts), past business dates and confirming one's
+        # own handover are for management.
         Permission.BUSINESS_DAYS_OPEN,
         Permission.CASH_SHIFTS_VIEW,
         Permission.CASH_SHIFTS_OPEN,

@@ -222,6 +222,7 @@ def handover_report(handover: CashShiftHandover, names: dict[uuid.UUID, str]) ->
         "reason": handover.reason,
         "outgoing_user": names.get(handover.outgoing_user_id),
         "incoming_user": names.get(handover.incoming_user_id),
+        "self_confirmed": handover.outgoing_user_id == handover.incoming_user_id,
         "created_at": handover.created_at.isoformat(),
     }
 
