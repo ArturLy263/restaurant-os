@@ -95,6 +95,10 @@ class ErrorCode(StrEnum):
     ORDER_ITEM_NOT_PAYABLE = "ORDER_ITEM_NOT_PAYABLE"
     INVALID_SPLIT = "INVALID_SPLIT"
     REFUND_EXCEEDS_REFUNDABLE = "REFUND_EXCEEDS_REFUNDABLE"
+    # A refund returns money for a settled (PAID) bill only.
+    BILL_NOT_SETTLED = "BILL_NOT_SETTLED"
+    # Paying by items needs every adjustment of the bill tied to an item.
+    ITEM_SPLIT_UNAVAILABLE = "ITEM_SPLIT_UNAVAILABLE"
 
     # Business days and cash
     BUSINESS_DAY_NOT_FOUND = "BUSINESS_DAY_NOT_FOUND"
@@ -112,10 +116,15 @@ class ErrorCode(StrEnum):
     CLOSING_EXPLANATION_REQUIRED = "CLOSING_EXPLANATION_REQUIRED"
     OPENING_AMOUNT_UNCHANGED = "OPENING_AMOUNT_UNCHANGED"
     INSUFFICIENT_CASH = "INSUFFICIENT_CASH"
+    # The incoming cashier must be another person than the outgoing one.
+    HANDOVER_SAME_USER = "HANDOVER_SAME_USER"
+    # A business date outside the allowed window.
+    INVALID_BUSINESS_DATE = "INVALID_BUSINESS_DATE"
 
     # Idempotency
     IDEMPOTENCY_KEY_INVALID = "IDEMPOTENCY_KEY_INVALID"
     IDEMPOTENCY_KEY_REUSED = "IDEMPOTENCY_KEY_REUSED"
+    IDEMPOTENCY_KEY_REQUIRED = "IDEMPOTENCY_KEY_REQUIRED"
 
 
 # Codes for HTTPExceptions raised without one (e.g. by FastAPI itself).

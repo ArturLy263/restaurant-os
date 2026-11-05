@@ -499,7 +499,10 @@ nothing: one item that cannot be routed rejects the whole send.
 
 ### Idempotency keys
 
-These mutations accept an `Idempotency-Key` header:
+These mutations accept an `Idempotency-Key` header. On the operations
+marked **required** (money moving and the cash register's shift lifecycle,
+Stage 3.1) a request without one is refused with 428
+`IDEMPOTENCY_KEY_REQUIRED` before anything runs:
 
 | Operation | Endpoint |
 | --- | --- |
@@ -510,7 +513,13 @@ These mutations accept an `Idempotency-Key` header:
 | Cancel a billed item (bill adjustment) | `POST /api/v1/bills/{bill_id}/items/{item_id}/cancel` |
 | Void (cancel) an order | `POST /api/v1/orders/{order_id}/void` |
 | Create (or fetch) the order's bill | `POST /api/v1/bills/order/{order_id}` |
-| Take a payment (closes the order when fully paid) | `POST /api/v1/bills/{bill_id}/payments` |
+| Take a payment (closes the order when fully paid) — **required** | `POST /api/v1/bills/{bill_id}/payments` |
+| Refund a payment of a paid bill — **required** | `POST /api/v1/payments/{payment_id}/refunds` |
+| Open a cash shift / confirm a handover — **required** | `POST /api/v1/cash/shifts` |
+| Close a shift, or hand it over (step 1) — **required** | `POST /api/v1/cash/shifts/{shift_id}/close\|handover` |
+| Cash in or out — **required** | `POST /api/v1/cash/shifts/{shift_id}/movements` |
+| Correct a shift's opening amount — **required** | `POST /api/v1/cash/shifts/{shift_id}/opening-corrections` |
+| Open or close a business day | `POST /api/v1/business-days`, `POST /api/v1/business-days/{id}/close` |
 | Start, finish or serve a preparation | `POST /api/v1/preparations/{preparation_id}/start\|ready\|serve` |
 | Discard a paid order's preparation | `POST /api/v1/preparations/{preparation_id}/discard` |
 
@@ -526,11 +535,12 @@ curl -X POST http://127.0.0.1:8000/api/v1/bills/$BILL_ID/payments \
   -d '{"amount": "15.00", "method": "CARD"}'
 ```
 
-- **Without a key** the request behaves exactly as before: no
-  deduplication. A retried add-item adds the item again and a retried
-  payment is a second payment (if the bill allows it); a retried send,
-  void or preparation step gets a 409. The key is optional so
-  existing clients keep working; new clients should always send it.
+- **Without a key** a required-key operation is refused (428
+  `IDEMPOTENCY_KEY_REQUIRED`) and nothing is written, so a retry can never
+  pay, refund or move cash twice. Elsewhere the request behaves exactly as
+  before, with no deduplication: a retried add-item adds the item again; a
+  retried send, void or preparation step gets a 409. New clients should
+  always send a key.
 - **Format:** 1-255 printable ASCII characters without spaces; otherwise
   400 `IDEMPOTENCY_KEY_INVALID`.
 - **Scope:** keys belong to the authenticated user within their

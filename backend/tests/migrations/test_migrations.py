@@ -708,12 +708,14 @@ def test_cashier_migration_refuses_unknown_payment_methods(migration_database):
 def test_cashier_schema_protects_handovers_days_and_closed_periods(migration_database):
     """d9e4b2a7c6f1's constraints and triggers, at the database level:
     handover arithmetic and reasons, a payment's day is its shift's day,
-    closed days and shifts and the ledgers can't be changed."""
+    closed days and shifts and the ledgers can't be changed. Run at that
+    revision: its fixtures write rows into closed periods directly, which
+    f2a8c6e4b1d9 refuses (tested below)."""
 
     migrate(migration_database, command.upgrade, "c7e1a5b9d3f8")
     with migration_database.begin() as connection:
         _legacy_paid_order(connection)
-    migrate(migration_database, command.upgrade, "head")
+    migrate(migration_database, command.upgrade, "d9e4b2a7c6f1")
     R, U, D1, D2, REG = (
         "11111111-1111-4111-8111-111111111111",
         "44444444-4444-4444-8444-444444444444",
@@ -778,3 +780,126 @@ def test_cashier_schema_protects_handovers_days_and_closed_periods(migration_dat
             with pytest.raises(Exception, match="immutable once closed"), connection.begin_nested():
                 connection.execute(text(statement))
         connection.execute(text(f"UPDATE cash_shifts SET status = 'CLOSED', closed_at = now() WHERE id = '{S2}'"))
+
+
+def test_ledger_hardening_refuses_changes_and_writes_into_closed_periods(migration_database):
+    """f2a8c6e4b1d9: payments are append-only; no ledger row (nor a shift)
+    can be written into a closed shift or business day; existing rows are
+    kept, and the downgrade drops only the triggers."""
+
+    migrate(migration_database, command.upgrade, "c7e1a5b9d3f8")
+    with migration_database.begin() as connection:
+        _legacy_paid_order(connection)
+    migrate(migration_database, command.upgrade, "d9e4b2a7c6f1")
+    R, U, BILL = (
+        "11111111-1111-4111-8111-111111111111",
+        "44444444-4444-4444-8444-444444444444",
+        "99999999-9999-4999-8999-999999999999",
+    )
+    D1, D2, REG = (
+        "d1d1d1d1-0000-4000-8000-000000000001",
+        "d2d2d2d2-0000-4000-8000-000000000002",
+        "eeeeeeee-0000-4000-8000-00000000000e",
+    )
+    # S_OPEN is open in the open day D2; S_CLOSED is closed in D2.
+    S_OPEN, S_CLOSED = "51515151-0000-4000-8000-000000000001", "52525252-0000-4000-8000-000000000002"
+    P_CLOSED = "acacacac-0000-4000-8000-00000000000c"
+    shift = (
+        "INSERT INTO cash_shifts (id, restaurant_id, cash_register_id, business_day_id, status, currency, "
+        "opening_amount, opened_by_user_id, opened_at, closed_at) VALUES ('{id}', '" + R + "', '" + REG
+        + "', '{day}', '{status}', 'EUR', 100, '" + U + "', now(), {closed_at})"
+    )
+    with migration_database.begin() as connection:
+        for statement in (
+            f"INSERT INTO business_days (id, restaurant_id, business_date, status, opened_by_user_id, opened_at, "
+            f"closed_by_user_id, closed_at, closing_summary) VALUES ('{D1}', '{R}', '2026-10-31', 'CLOSED', '{U}', now(), "
+            f"'{U}', now(), '{{}}')",
+            f"INSERT INTO business_days (id, restaurant_id, business_date, status, opened_by_user_id, opened_at) "
+            f"VALUES ('{D2}', '{R}', '2026-11-01', 'OPEN', '{U}', now())",
+            f"INSERT INTO cash_registers (id, restaurant_id, name, is_active, created_at) VALUES ('{REG}', '{R}', 'Main', true, now())",
+            shift.format(id=S_CLOSED, day=D2, status="OPEN", closed_at="NULL"),
+            "INSERT INTO payments (id, restaurant_id, bill_id, amount, currency, method, status, user_id, "
+            "cash_shift_id, business_day_id, confirmation_method, confirmed_at, created_at) VALUES "
+            f"('{P_CLOSED}', '{R}', '{BILL}', 1, 'EUR', 'CASH', 'COMPLETED', '{U}', '{S_CLOSED}', '{D2}', "
+            "'CASH_RECEIVED', now(), now())",
+            f"UPDATE cash_shifts SET status = 'CLOSED', closed_at = now() WHERE id = '{S_CLOSED}'",
+            shift.format(id=S_OPEN, day=D2, status="OPEN", closed_at="NULL"),
+        ):
+            connection.execute(text(statement))
+
+    migrate(migration_database, command.upgrade, "f2a8c6e4b1d9")
+
+    def payment_into(shift_id, day=D2):
+        return (
+            "INSERT INTO payments (id, restaurant_id, bill_id, amount, currency, method, status, user_id, "
+            "cash_shift_id, business_day_id, confirmation_method, confirmed_at, created_at) VALUES "
+            f"(gen_random_uuid(), '{R}', '{BILL}', 1, 'EUR', 'CASH', 'COMPLETED', '{U}', '{shift_id}', '{day}', "
+            "'CASH_RECEIVED', now(), now())"
+        )
+
+    into_closed_shift = {
+        "payments": payment_into(S_CLOSED),
+        "payment_allocations": (
+            "INSERT INTO payment_allocations (id, restaurant_id, payment_id, order_item_id, amount, created_at) "
+            f"VALUES (gen_random_uuid(), '{R}', '{P_CLOSED}', gen_random_uuid(), 1, now())"
+        ),
+        "refunds": (
+            "INSERT INTO refunds (id, restaurant_id, payment_id, cash_shift_id, business_day_id, amount, tip_amount, "
+            "currency, method, confirmation_method, reason, user_id, created_at) VALUES (gen_random_uuid(), "
+            f"'{R}', '{P_CLOSED}', '{S_CLOSED}', '{D2}', 1, 0, 'EUR', 'CASH', 'CASH_RECEIVED', 'x', '{U}', now())"
+        ),
+        "cash_movements": (
+            "INSERT INTO cash_movements (id, restaurant_id, cash_shift_id, type, amount, reason, user_id, created_at) "
+            f"VALUES (gen_random_uuid(), '{R}', '{S_CLOSED}', 'CASH_IN', 5, 'x', '{U}', now())"
+        ),
+        "cash_opening_corrections": (
+            "INSERT INTO cash_opening_corrections (id, restaurant_id, cash_shift_id, previous_amount, new_amount, "
+            f"reason, user_id, created_at) VALUES (gen_random_uuid(), '{R}', '{S_CLOSED}', 100, 90, 'x', '{U}', now())"
+        ),
+        "cash_shift_closings": (
+            "INSERT INTO cash_shift_closings (id, restaurant_id, cash_shift_id, expected_amount, counted_amount, "
+            f"difference, summary, user_id, created_at) VALUES (gen_random_uuid(), '{R}', '{S_CLOSED}', 101, 101, 0, "
+            f"'{{}}', '{U}', now())"
+        ),
+        "cash_shift_handovers": (
+            "INSERT INTO cash_shift_handovers (id, restaurant_id, cash_register_id, business_day_id, from_shift_id, "
+            "to_shift_id, previous_expected_amount, handed_over_amount, received_amount, difference, reason, "
+            f"outgoing_user_id, incoming_user_id, created_at) VALUES (gen_random_uuid(), '{R}', '{REG}', '{D2}', "
+            f"'{S_OPEN}', '{S_CLOSED}', 101, 101, 101, 0, NULL, '{U}', '{U}', now())"
+        ),
+        # A shift can't be opened in a closed business day.
+        "cash_shifts": shift.format(id="53535353-0000-4000-8000-000000000003", day=D1, status="OPEN", closed_at="NULL"),
+    }
+    with migration_database.begin() as connection:
+        for table, statement in into_closed_shift.items():
+            with pytest.raises(IntegrityError, match="open cash shift of an open business day"), connection.begin_nested():
+                connection.execute(text(statement))
+        # Payments are never changed or deleted, old or new.
+        for statement in (
+            "UPDATE payments SET amount = 2 WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'",
+            f"UPDATE payments SET tip_amount = 1 WHERE id = '{P_CLOSED}'",
+            f"DELETE FROM payments WHERE id = '{P_CLOSED}'",
+        ):
+            with pytest.raises(Exception, match="payments rows are append-only"), connection.begin_nested():
+                connection.execute(text(statement))
+        # The open shift of the open day takes writes as before.
+        connection.execute(text(payment_into(S_OPEN)))
+        connection.execute(text(
+            "INSERT INTO cash_movements (id, restaurant_id, cash_shift_id, type, amount, reason, user_id, created_at) "
+            f"VALUES (gen_random_uuid(), '{R}', '{S_OPEN}', 'CASH_IN', 5, 'x', '{U}', now())"
+        ))
+
+    counts = "SELECT (SELECT count(*) FROM payments), (SELECT count(*) FROM cash_movements), (SELECT count(*) FROM cash_shifts)"
+    with migration_database.begin() as connection:
+        before = connection.execute(text(counts)).one()
+    assert tuple(before) == (3, 1, 2)
+
+    migrate(migration_database, command.downgrade, "d9e4b2a7c6f1")
+    with migration_database.begin() as connection:
+        assert tuple(connection.execute(text(counts)).one()) == tuple(before)
+        assert connection.scalar(text(
+            "SELECT count(*) FROM pg_trigger WHERE tgname LIKE '%open_period_only' OR tgname = 'payments_append_only'"
+        )) == 0
+        assert connection.scalar(text(
+            "SELECT count(*) FROM pg_proc WHERE proname = 'cashier_refuse_insert_into_closed_period'"
+        )) == 0

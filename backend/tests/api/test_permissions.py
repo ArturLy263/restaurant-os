@@ -14,6 +14,7 @@ from tests.factories import (
     create_restaurant,
     create_station,
     create_user,
+    with_idempotency_key,
 )
 
 
@@ -67,8 +68,9 @@ ENDPOINTS = [
      "bills:view", {"CASHIER"} | MANAGEMENT),
     ("POST", f"/api/v1/bills/{_ID}/payments", {"amount": "1.00", "method": "CASH"},
      "payments:create", {"CASHIER"} | MANAGEMENT),
+    # Lowering what is owed is for management only (Stage 3.1).
     ("POST", f"/api/v1/bills/{_ID}/items/{_ID}/cancel", {"reason": "x"},
-     "bills:adjust", {"CASHIER"} | MANAGEMENT),
+     "bills:adjust", MANAGEMENT),
     ("GET", "/api/v1/events", None,
      "events:view", MANAGEMENT),
     # Cashier module (Stage 3).
@@ -96,8 +98,8 @@ ENDPOINTS = [
      "cash_shifts:view", {"CASHIER"} | MANAGEMENT),
     ("POST", f"/api/v1/cash/shifts/{_ID}/close", {"counted_amount": "1.00"},
      "cash_shifts:close", {"CASHIER"} | MANAGEMENT),
-    # Also needs cash_shifts:open (same roles).
-    ("POST", f"/api/v1/cash/shifts/{_ID}/handover", {"counted_amount": "1.00", "received_amount": "1.00"},
+    # Step 1 of the two-party handover (step 2 is opening a shift).
+    ("POST", f"/api/v1/cash/shifts/{_ID}/handover", {"counted_amount": "1.00"},
      "cash_shifts:close", {"CASHIER"} | MANAGEMENT),
     ("POST", f"/api/v1/cash/shifts/{_ID}/opening-corrections", {"opening_amount": "1.00", "reason": "x"},
      "cash_opening_balance:correct", MANAGEMENT),
@@ -111,7 +113,9 @@ AUTHENTICATED_ONLY_ROUTES = {("GET", "/api/v1/me")}
 # Permissions without an endpoint of their own: orders:manage_all lifts the
 # creator-only order rule; preparations:all_stations lifts station scope
 # (waiters serve from every station); menu and table management APIs do
-# not exist yet.
+# not exist yet; business_days:open_past (dates before yesterday),
+# cash_drawer:view_expected (blind count) and cash_handovers:self_confirm
+# change what the cash endpoints allow or show (test_cashier.py).
 EXPECTED_ROLE_PERMISSIONS = {
     role: {
         permission
@@ -119,7 +123,11 @@ EXPECTED_ROLE_PERMISSIONS = {
         if role in roles
     }
     | (
-        {"orders:manage_all", "menu:manage", "tables:manage"}
+        {
+            "orders:manage_all", "menu:manage", "tables:manage",
+            "business_days:open_past", "cash_drawer:view_expected",
+            "cash_handovers:self_confirm",
+        }
         if role in MANAGEMENT
         else set()
     )
@@ -137,8 +145,12 @@ STATION_ROLE_TYPES = {"KITCHEN": "KITCHEN", "BAR": "BAR"}
 
 
 def call(client, endpoint, headers):
+    """Every request carries an Idempotency-Key (mandatory on money and
+    cash register routes, ignored elsewhere), so a refusal here is about
+    permissions only."""
+
     method, path, body, *_ = endpoint
-    return client.request(method, path, json=body, headers=headers)
+    return client.request(method, path, json=body, headers=with_idempotency_key(headers))
 
 
 def assert_permission_denied(response, permission):
@@ -456,8 +468,14 @@ def test_other_restaurant_resources_look_missing(pos, staff, other_staff):
     def both(role, method, template, body=None):
         headers = headers_for(other_staff[role])
         return (
-            client.request(method, template.format(id=foreign_ids[template]), json=body, headers=headers),
-            client.request(method, template.format(id=missing), json=body, headers=headers),
+            client.request(
+                method, template.format(id=foreign_ids[template]), json=body,
+                headers=with_idempotency_key(headers),
+            ),
+            client.request(
+                method, template.format(id=missing), json=body,
+                headers=with_idempotency_key(headers),
+            ),
         )
 
     foreign_ids = {

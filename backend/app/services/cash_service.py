@@ -7,7 +7,7 @@ CashRepository. Services end with `commit(db)`, as elsewhere.
 """
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -58,6 +58,14 @@ def _conflict(code: ErrorCode, message: str, details: dict | None = None) -> Api
     )
 
 
+def _forbidden(permission: str) -> ApiError:
+    return ApiError(
+        status_code=status.HTTP_403_FORBIDDEN,
+        code=ErrorCode.PERMISSION_DENIED,
+        message=f"Missing permission: {permission}",
+    )
+
+
 def _required(code: ErrorCode, message: str) -> ApiError:
     return ApiError(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -92,7 +100,20 @@ class CashService:
         restaurant_id: uuid.UUID,
         user_id: uuid.UUID,
         business_date: date | None = None,
+        *,
+        may_open_past: bool = False,
     ) -> BusinessDay:
+        """Open the restaurant's next business day.
+
+        A business day is a trading period, not a calendar date: it is
+        named after the restaurant-local date it trades for, which may be
+        yesterday (a day opened after midnight for the night's service).
+        The date defaults to today (restaurant time); it may never be in
+        the future, and every new day is dated after the latest existing
+        one. A date before yesterday needs business_days:open_past
+        (management), and the opening is recorded as backdated.
+        """
+
         # Serializes opening per restaurant: the existence checks below
         # then can't race (the unique indexes are the backstop).
         restaurant = db.scalar(
@@ -100,8 +121,9 @@ class CashService:
             .where(Restaurant.id == restaurant_id)
             .with_for_update()
         )
+        today = datetime.now(ZoneInfo(restaurant.timezone)).date()
         if business_date is None:
-            business_date = datetime.now(ZoneInfo(restaurant.timezone)).date()
+            business_date = today
 
         repository = CashRepository(db)
         if repository.lock_open_business_day(restaurant_id) is not None:
@@ -120,6 +142,24 @@ class CashService:
                 f"The business day {business_date.isoformat()} already exists; "
                 "a closed day is never reopened",
             )
+        if business_date > today:
+            raise _required(
+                ErrorCode.INVALID_BUSINESS_DATE,
+                f"A business day can't be dated in the future (today is {today.isoformat()})",
+            )
+        latest = db.scalar(
+            select(func.max(BusinessDay.business_date)).where(
+                BusinessDay.restaurant_id == restaurant_id
+            )
+        )
+        if latest is not None and business_date < latest:
+            raise _required(
+                ErrorCode.INVALID_BUSINESS_DATE,
+                f"A new business day must be dated after the latest one ({latest.isoformat()})",
+            )
+        backdated = business_date < today - timedelta(days=1)
+        if backdated and not may_open_past:
+            raise _forbidden("business_days:open_past")
 
         day = BusinessDay(
             restaurant_id=restaurant_id,
@@ -137,7 +177,11 @@ class CashService:
             event_type="business_day.opened",
             entity_type="business_day",
             entity_id=day.id,
-            metadata={"business_date": business_date.isoformat()},
+            metadata={
+                "business_date": business_date.isoformat(),
+                "restaurant_date": today.isoformat(),
+                "backdated": backdated,
+            },
         )
         OutboxService.record(
             db=db,
@@ -288,9 +332,20 @@ class CashService:
         user_id: uuid.UUID,
         opening_amount: Decimal,
         handover_reason: str | None = None,
+        *,
+        may_self_confirm: bool = False,
     ) -> CashShift:
         """Open the register's next shift with the cash the opening
-        cashier counted, reconciled with the previous shift's count."""
+        cashier counted (blind), reconciled with the previous shift's count.
+
+        When the register's previous shift is closed, this is the second
+        step of the handover: the incoming cashier confirms the cash
+        physically received, which becomes the opening amount, and a
+        handover is recorded between the two shifts. The incoming cashier
+        must be another person than the one who closed the previous shift,
+        unless they hold cash_handovers:self_confirm (management); such a
+        handover shows the same user on both sides.
+        """
 
         repository = CashRepository(db)
         day = repository.lock_open_business_day(restaurant_id)
@@ -303,7 +358,7 @@ class CashService:
                 "The register already has an open shift; close it or hand it over",
             )
         shift = CashService._open(
-            db, day, register, user_id, opening_amount, handover_reason
+            db, day, register, user_id, opening_amount, handover_reason, may_self_confirm
         )
         commit(db)
         db.refresh(shift)
@@ -332,35 +387,22 @@ class CashService:
         shift_id: uuid.UUID,
         counted_amount: Decimal,
         closing_explanation: str | None,
-        received_amount: Decimal,
-        handover_reason: str | None,
     ) -> CashShift:
-        """Close the open shift and open the next one in one transaction,
-        so payments never find the register without a shift. The
-        authenticated user records both steps and opens the new shift."""
+        """First step of a two-party handover: the outgoing cashier counts
+        the drawer and closes their shift under their own name.
 
-        # Checked before anything is written; _open checks it again
-        # against the closing it reads.
-        if received_amount != counted_amount and not handover_reason:
-            raise _required(
-                ErrorCode.HANDOVER_REASON_REQUIRED,
-                f"The cash received ({cash_ledger.money(received_amount)}) differs from "
-                f"the outgoing count ({cash_ledger.money(counted_amount)}); give a reason",
-            )
-        repository = CashRepository(db)
-        day = repository.lock_open_business_day(restaurant_id)
-        if day is None:
-            raise _conflict(ErrorCode.NO_OPEN_BUSINESS_DAY, "Open the business day first")
-        register = repository.lock_or_create_active_register(restaurant_id)
-        outgoing = CashService._lock_open_shift(db, restaurant_id, shift_id)
-        CashService._close(db, outgoing, user_id, counted_amount, closing_explanation)
-        db.flush()
-        incoming = CashService._open(
-            db, day, register, user_id, received_amount, handover_reason
+        The drawer then waits for the incoming cashier, who confirms the
+        cash physically received by opening the next shift (open_shift),
+        under their own name. Between the two steps the register has no
+        open shift: payments, refunds and cash movements are refused and
+        nothing is recorded, so no money can land outside a shift. (This
+        replaces the one-step handover, which recorded the caller as both
+        cashiers.)
+        """
+
+        return CashService.close_shift(
+            db, restaurant_id, user_id, shift_id, counted_amount, closing_explanation
         )
-        commit(db)
-        db.refresh(incoming)
-        return incoming
 
     @staticmethod
     def correct_opening_amount(
@@ -481,9 +523,10 @@ class CashService:
 
         available = cash_ledger.drawer(db, shift).expected
         if amount > available:
+            # The amount available is not in the message (blind count).
             raise _conflict(
                 ErrorCode.INSUFFICIENT_CASH,
-                f"The drawer should hold only {cash_ledger.money(available)}",
+                "The drawer should not hold that much cash",
             )
 
     @staticmethod
@@ -525,6 +568,7 @@ class CashService:
         user_id: uuid.UUID,
         opening_amount: Decimal,
         handover_reason: str | None,
+        may_self_confirm: bool,
     ) -> CashShift:
         restaurant = db.get(Restaurant, day.restaurant_id)
         previous = CashRepository(db).last_closed_shift(register.id)
@@ -533,17 +577,27 @@ class CashService:
             if previous is not None
             else None
         )
+        if (
+            previous_closing is not None
+            and previous_closing.user_id == user_id
+            and not may_self_confirm
+        ):
+            raise _conflict(
+                ErrorCode.HANDOVER_SAME_USER,
+                "You closed the previous shift; the cash must be received and "
+                "counted by another employee",
+            )
         difference = (
             opening_amount - previous_closing.counted_amount
             if previous_closing is not None
             else ZERO
         )
+        # Blind count: the amounts are never in the message.
         if difference != ZERO and not handover_reason:
             raise _required(
                 ErrorCode.HANDOVER_REASON_REQUIRED,
-                f"The cash received differs from the previous shift's count "
-                f"({cash_ledger.money(previous_closing.counted_amount)}) by "
-                f"{cash_ledger.money(difference)}; give a reason",
+                "The cash received differs from what the previous shift handed "
+                "over; recount, or give a reason",
             )
 
         now = datetime.utcnow()
@@ -623,6 +677,7 @@ class CashService:
                     "difference": cash_ledger.money(handover.difference),
                     "reason": handover.reason,
                     "outgoing_user_id": str(handover.outgoing_user_id),
+                    "self_confirmed": handover.outgoing_user_id == handover.incoming_user_id,
                 },
             )
             OutboxService.record(
@@ -650,11 +705,12 @@ class CashService:
         report = cash_ledger.shift_report(db, shift)
         expected = Decimal(report["drawer"]["expected"])
         difference = counted_amount - expected
+        # Blind count: the expected cash is never in the message.
         if difference != ZERO and not explanation:
             raise _required(
                 ErrorCode.CLOSING_EXPLANATION_REQUIRED,
-                f"The count differs from the expected cash ({cash_ledger.money(expected)}) "
-                f"by {cash_ledger.money(difference)}; explain the difference",
+                "The count differs from the expected cash; recount, or explain "
+                "the difference",
             )
         now = datetime.utcnow()
         closing = CashShiftClosing(
@@ -669,6 +725,9 @@ class CashService:
             created_at=now,
         )
         db.add(closing)
+        # The closing is written while the shift is still OPEN (the
+        # database accepts ledger rows only into open shifts).
+        db.flush()
         CASH_SHIFT.apply(shift, "CLOSED")
         shift.closed_at = now
         db.flush()

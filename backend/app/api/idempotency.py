@@ -11,8 +11,12 @@ through `Idempotency.run`:
 
 Contract (also documented in the README):
 
-- The header is optional. Without it the request runs exactly as before,
-  with no replay protection.
+- The header is optional, except on routes that move money or change the
+  cash register's shifts (payments, refunds, cash movements, opening,
+  closing and handing over a shift, opening corrections): those depend on
+  `RequiredIdempotency` and refuse a request without a key (428
+  IDEMPOTENCY_KEY_REQUIRED) before doing anything. Elsewhere a request
+  without a key runs exactly as before, with no replay protection.
 - Keys are scoped to the authenticated user (and so to the restaurant):
   the same key used by another user is an unrelated key.
 - The first request with a key runs the operation. Its key, the business
@@ -85,6 +89,12 @@ IDEMPOTENT_ROUTE_RESPONSES = {
             },
         },
     },
+}
+
+# Routes whose key is mandatory also document the missing-key error.
+REQUIRED_IDEMPOTENCY_ROUTE_RESPONSES = {
+    **IDEMPOTENT_ROUTE_RESPONSES,
+    428: {"description": "Missing Idempotency-Key (IDEMPOTENCY_KEY_REQUIRED)"},
 }
 
 
@@ -302,3 +312,37 @@ class Idempotency:
             status_code=record.response_status_code,
             headers={REPLAYED_HEADER: "true"},
         )
+
+
+class RequiredIdempotency(Idempotency):
+    """`Idempotency` for operations that must never run twice by accident
+    (money moving, shift lifecycle): a request without a key is refused
+    before the operation runs, so a client retry can't repeat it."""
+
+    def __init__(
+        self,
+        request: Request,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user),
+        idempotency_key: str | None = Header(
+            default=None,
+            alias=IDEMPOTENCY_KEY_HEADER,
+            description=(
+                "Required. A unique client-generated value (e.g. a UUID, "
+                "1-255 printable ASCII characters) identifying this "
+                "operation; retries with the same key and request replay "
+                "the original result instead of repeating it."
+            ),
+        ),
+    ):
+        if idempotency_key is None:
+            raise ApiError(
+                status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+                code=ErrorCode.IDEMPOTENCY_KEY_REQUIRED,
+                message=(
+                    f"This operation requires an {IDEMPOTENCY_KEY_HEADER} "
+                    "header (e.g. a new UUID per operation, reused on retry)"
+                ),
+            )
+
+        super().__init__(request, db, current_user, idempotency_key)

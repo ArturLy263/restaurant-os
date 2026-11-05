@@ -244,7 +244,9 @@ bills or kitchen preparations refers to a cash shift.
      is listed in the day report for the manager.
    - The very first shift of a register has no predecessor and no
      handover row.
-4. **Atomic handover** (`POST /cash/shifts/{id}/handover`; needs both
+4. **Atomic handover** — *superseded in Stage 3.1 by a two-party handover
+   (docs/stage-3-1-cashier-integrity.md): the one-step call recorded the
+   caller as both cashiers.* (`POST /cash/shifts/{id}/handover`; needs both
    `cash_shifts:close` and `cash_shifts:open`). In one transaction it
    closes the outgoing shift (counted amount, closing explanation) and
    opens the incoming one (received amount, incoming cashier, handover

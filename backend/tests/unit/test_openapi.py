@@ -20,6 +20,17 @@ IDEMPOTENT_OPERATIONS = [
     "/api/v1/preparations/{preparation_id}/serve",
 ]
 
+# Routes that refuse a request without a key (money and shift lifecycle).
+REQUIRED_KEY_OPERATIONS = [
+    "/api/v1/bills/{bill_id}/payments",
+    "/api/v1/payments/{payment_id}/refunds",
+    "/api/v1/cash/shifts",
+    "/api/v1/cash/shifts/{shift_id}/close",
+    "/api/v1/cash/shifts/{shift_id}/handover",
+    "/api/v1/cash/shifts/{shift_id}/movements",
+    "/api/v1/cash/shifts/{shift_id}/opening-corrections",
+]
+
 VALIDATION_ERROR_CONTENT = {
     "application/json": {
         "schema": {"$ref": "#/components/schemas/HTTPValidationError"},
@@ -79,3 +90,20 @@ def test_menu_prices_are_documented_as_decimal_strings(schema):
         documented = components[model]["properties"][field]
         assert documented["type"] == "string"
         assert documented["pattern"] == r"^-?\d{1,8}\.\d{2}$"
+
+
+@pytest.mark.parametrize("path", REQUIRED_KEY_OPERATIONS)
+def test_money_routes_document_their_mandatory_key(schema, path):
+    operation = schema["paths"][path]["post"]
+
+    assert "IDEMPOTENCY_KEY_REQUIRED" in operation["responses"]["428"]["description"]
+    assert "IDEMPOTENCY_KEY_REUSED" in operation["responses"]["422"]["description"]
+    [header] = [p for p in operation["parameters"] if p["in"] == "header"]
+    assert header["name"] == "Idempotency-Key"
+    assert header["description"].startswith("Required.")
+
+
+def test_other_idempotent_routes_keep_the_key_optional(schema):
+    for path in set(IDEMPOTENT_OPERATIONS) - set(REQUIRED_KEY_OPERATIONS):
+        operation = schema["paths"][path]["post"]
+        assert "428" not in operation["responses"], path

@@ -4,7 +4,12 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.idempotency import IDEMPOTENT_ROUTE_RESPONSES, Idempotency
+from app.api.idempotency import (
+    IDEMPOTENT_ROUTE_RESPONSES,
+    REQUIRED_IDEMPOTENCY_ROUTE_RESPONSES,
+    Idempotency,
+    RequiredIdempotency,
+)
 from app.core.dependencies import require_permission
 from app.core.permissions import Permission
 from app.db.dependencies import get_db
@@ -57,7 +62,7 @@ def create_bill(
     "/{bill_id}/payments",
     response_model=PaymentDetailResponse,
     status_code=status.HTTP_201_CREATED,
-    responses=IDEMPOTENT_ROUTE_RESPONSES,
+    responses=REQUIRED_IDEMPOTENCY_ROUTE_RESPONSES,
 )
 def create_payment(
     bill_id: uuid.UUID,
@@ -66,7 +71,7 @@ def create_payment(
     current_user: User = Depends(
         require_permission(Permission.PAYMENTS_CREATE)
     ),
-    idempotency: Idempotency = Depends(),
+    idempotency: RequiredIdempotency = Depends(),
 ):
     """Take a payment (CASH, or CARD confirmed by the cashier after the
     external terminal approved it) in the open cash shift of the open

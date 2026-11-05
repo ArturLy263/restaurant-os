@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.errors import ApiError, ErrorCode
 from app.core.states import BILL, ORDER, TABLE
-from app.db.models.bill import Bill, Payment, PaymentAllocation, Refund
+from app.db.models.bill import Bill, BillAdjustment, Payment, PaymentAllocation, Refund
 from app.db.models.cash import BusinessDay, CashMovement, CashShift
 from app.db.models.order import Order, OrderItem
 from app.db.models.restaurant import Restaurant
@@ -24,6 +24,9 @@ from app.services.event_service import EventService
 from app.services.outbox_service import OutboxService
 
 ZERO = Decimal("0.00")
+# Adjustments that charge or credit exactly one item's price: a bill with
+# only these can be paid by items (each item's total_price is its share).
+ITEM_ADJUSTMENT_TYPES = frozenset({"ITEM_ADDITION", "ITEM_CANCELLATION"})
 # Equal splits: at most this many shares.
 MAX_SPLIT_PARTS = 50
 
@@ -204,7 +207,7 @@ class BillService:
         adjusted_total = bill.adjusted_total
         remaining_amount = bill.amount_due
 
-        items = BillService._items_to_pay(db, order, amount, order_item_ids)
+        items = BillService._items_to_pay(db, order, bill, amount, order_item_ids)
 
         if amount > remaining_amount:
             raise ApiError(
@@ -394,14 +397,25 @@ class BillService:
     def _items_to_pay(
         db: Session,
         order: Order,
+        bill: Bill,
         amount: Decimal,
         order_item_ids: list[uuid.UUID] | None,
     ) -> list[OrderItem]:
         """The items a split-by-items payment pays, checked under the
-        order lock; the unique allocation per item is the backstop."""
+        order lock; the unique allocation per item is the backstop.
+
+        Each item is paid at its own total_price, to the cent; nothing is
+        prorated. That is exact only while every applied adjustment of the
+        bill is an item's own price added or cancelled (so the adjusted
+        total is the sum of the uncancelled items). Any other adjustment
+        (none exists yet, e.g. a future bill-level discount) can't be
+        assigned to items without rounding choices, so paying by items is
+        then refused (ITEM_SPLIT_UNAVAILABLE) rather than guessed: pay by
+        amount instead."""
 
         if not order_item_ids:
             return []
+        BillService._ensure_item_split_available(db, order, bill)
         ids = set(order_item_ids)
         items = db.scalars(
             select(OrderItem).where(
@@ -436,6 +450,30 @@ class BillService:
         return sorted(items, key=lambda item: (item.created_at, item.id))
 
     @staticmethod
+    def _ensure_item_split_available(db: Session, order: Order, bill: Bill) -> None:
+        unallocatable = db.scalar(
+            select(BillAdjustment.id).where(
+                BillAdjustment.bill_id == bill.id,
+                BillAdjustment.status == "APPLIED",
+                (BillAdjustment.order_item_id.is_(None))
+                | BillAdjustment.type.not_in(ITEM_ADJUSTMENT_TYPES),
+            ).limit(1)
+        )
+        items_total = sum(
+            (item.total_price for item in order.items if item.status != "CANCELLED"),
+            ZERO,
+        )
+        if unallocatable is not None or items_total != bill.adjusted_total:
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.ITEM_SPLIT_UNAVAILABLE,
+                message=(
+                    "This bill has an adjustment that belongs to no single item; "
+                    "pay it by amount instead of by items"
+                ),
+            )
+
+    @staticmethod
     def refund_payment(
         db: Session,
         restaurant_id: uuid.UUID,
@@ -452,7 +490,13 @@ class BillService:
         shift and business day. The payment and the bill are kept as they
         are (a refund does not reopen a bill); `amount` reduces revenue,
         `tip_amount` reduces tips only; together they never exceed what
-        the payment took."""
+        the payment took.
+
+        Only a settled (PAID) bill's payments are refunded. While a bill is
+        OPEN its amount due is total - payments, so a refund there would
+        let the bill close as paid with less money kept than its total;
+        a mistaken payment on an open bill is settled first (pay the rest),
+        then refunded."""
 
         payment = db.scalar(
             select(Payment).where(
@@ -479,6 +523,17 @@ class BillService:
             .options(selectinload(Payment.refunds))
             .execution_options(populate_existing=True)
         )
+        # Re-read under the order lock: the bill can't change meanwhile.
+        bill = BillRepository(db).get_for_order(order.id)
+        if bill.status != "PAID":
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code=ErrorCode.BILL_NOT_SETTLED,
+                message=(
+                    "Only payments of a settled (paid) bill can be refunded; "
+                    f"this bill is {bill.status.lower()}"
+                ),
+            )
 
         if amount + tip_amount <= ZERO:
             raise ApiError(

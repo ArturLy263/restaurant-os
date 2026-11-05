@@ -8,7 +8,7 @@ from app.db.models.order import Order, OrderItem
 from app.db.models.preparation import Preparation
 from app.db.models.product import Product
 from app.db.models.table import Table
-from tests.factories import auth_headers
+from tests.factories import auth_headers, with_idempotency_key
 
 
 class Pos:
@@ -67,7 +67,7 @@ class Pos:
         return self.client.post(
             f"/api/v1/bills/{bill_id}/payments",
             json=body,
-            headers=self.headers,
+            headers=with_idempotency_key(self.headers),
         )
 
     def cancel(self, order_id, item_id, reason="Customer changed mind"):
