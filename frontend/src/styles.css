@@ -1266,3 +1266,456 @@ button {
     min-height: 0;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Cashier workspace                                                   */
+/*                                                                     */
+/* The theme tokens are only redefined while <html data-workspace=     */
+/* "cashier"> (set by index.html before the first render and kept by   */
+/* App), so the waiter POS and the kitchen display keep their look.    */
+/* Premium Dark is the default; <html data-theme="light"> switches.    */
+/* ------------------------------------------------------------------ */
+
+:root[data-workspace="cashier"] {
+  color-scheme: dark;
+
+  --bg: #0a0c10;
+  --surface: #12151b;
+  --surface-raised: #1b1f27;
+  --border: #2a303b;
+  --text: #f1f3f7;
+  --text-muted: #9aa3b2;
+
+  --pending: #d8b46a;
+  --in-progress: #f0b44c;
+  --ready: #4fd08a;
+  --danger: #f2706b;
+  --warning: #f0b44c;
+
+  --cx-accent-contrast: #1d1609;
+  --cx-accent-soft: rgb(216 180 106 / 14%);
+  --cx-warning-soft: rgb(240 180 76 / 12%);
+  --cx-shadow: 0 1px 0 rgb(255 255 255 / 4%) inset, 0 12px 32px rgb(0 0 0 / 35%);
+}
+
+:root[data-workspace="cashier"][data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f4f5f7;
+  --surface: #ffffff;
+  --surface-raised: #eef0f3;
+  --border: #d5d9e0;
+  --text: #141821;
+  --text-muted: #555e6c;
+
+  --pending: #8a5a00;
+  --in-progress: #9a5b00;
+  --ready: #17803d;
+  --danger: #b42318;
+  --warning: #9a5b00;
+
+  --cx-accent-contrast: #ffffff;
+  --cx-accent-soft: rgb(138 90 0 / 10%);
+  --cx-warning-soft: rgb(154 91 0 / 10%);
+  --cx-shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 4px 12px rgb(16 24 40 / 6%);
+}
+
+.cx .button--primary {
+  color: var(--cx-accent-contrast);
+}
+
+.cx-topbar__mode {
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--pending);
+  color: var(--pending);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.cx-layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.cx-nav {
+  padding: 1rem 0.75rem;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.cx-nav__list {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cx-nav__button {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 1rem;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cx-nav__button:hover {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+.cx-nav__button--current {
+  border-color: var(--pending);
+  background: var(--cx-accent-soft);
+  color: var(--text);
+}
+
+.cx-main {
+  display: grid;
+  align-content: start;
+  gap: 1rem;
+  padding: 1.5rem;
+  min-width: 0;
+}
+
+.cx-section {
+  display: grid;
+  gap: 1rem;
+}
+
+.cx-section__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.cx-section__title {
+  font-size: 1.6rem;
+  letter-spacing: -0.01em;
+}
+
+.cx-section__meta {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.cx-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 1rem;
+}
+
+.cx-card {
+  display: grid;
+  align-content: start;
+  gap: 0.75rem;
+  padding: 1.1rem 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--cx-shadow);
+}
+
+.cx-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.cx-card__title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.cx-card__text {
+  color: var(--text);
+}
+
+.cx-card__hint {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.cx-chip {
+  padding: 0.1rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.cx-chip--ok {
+  background: color-mix(in srgb, var(--ready) 18%, transparent);
+  color: var(--ready);
+}
+
+.cx-chip--off {
+  background: var(--surface-raised);
+  color: var(--text-muted);
+}
+
+.cx-chip--warn {
+  background: var(--cx-warning-soft);
+  color: var(--warning);
+}
+
+.cx-facts {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0;
+}
+
+.cx-facts__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.cx-facts dt {
+  color: var(--text-muted);
+}
+
+.cx-facts dd {
+  margin: 0;
+  font-weight: 600;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.cx-note {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.cx-placeholder {
+  display: grid;
+  gap: 0.5rem;
+  justify-items: start;
+  padding: 2rem;
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.cx-placeholder__badge {
+  padding: 0.1rem 0.6rem;
+  border-radius: 999px;
+  background: var(--cx-accent-soft);
+  color: var(--pending);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.cx-placeholder__text {
+  color: var(--text-muted);
+}
+
+.cx-fieldset {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.cx-fieldset__legend {
+  padding: 0 0.4rem;
+  font-weight: 700;
+}
+
+.cx-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.cx-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 0.75rem;
+  align-items: center;
+  min-height: var(--touch);
+  padding: 0.75rem 1rem;
+  border: 2px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.cx-option input {
+  grid-row: span 2;
+  width: 20px;
+  height: 20px;
+  accent-color: var(--pending);
+}
+
+.cx-option--current {
+  border-color: var(--pending);
+  background: var(--cx-accent-soft);
+}
+
+.cx-option__label {
+  font-weight: 700;
+}
+
+.cx-option__hint {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.cx-option:has(input:focus-visible) {
+  outline: 3px solid var(--pending);
+  outline-offset: 2px;
+}
+
+/* Unresolved operations */
+
+.cx-pending {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--warning);
+  border-radius: 12px;
+  background: var(--cx-warning-soft);
+}
+
+.cx-pending__warning {
+  font-weight: 600;
+}
+
+.cx-pending__summary {
+  min-height: 32px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.cx-pending__details[open] .cx-pending__summary {
+  margin-bottom: 0.5rem;
+}
+
+.cx-pending__list {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cx-pending__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 0.75rem;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.cx-pending__item--unknown {
+  border-color: var(--warning);
+}
+
+.cx-pending__item--failed {
+  border-color: var(--danger);
+}
+
+.cx-pending__info {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.cx-pending__type {
+  font-weight: 700;
+}
+
+.cx-pending__meta {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.cx-pending__actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.cx-pending__item--checked {
+  border-style: dashed;
+}
+
+.cx-pending__item--succeeded {
+  border-color: var(--ready);
+}
+
+.cx-check {
+  display: grid;
+  gap: 0.5rem;
+  width: min(420px, 100%);
+}
+
+/* Tablets: a narrower section list. */
+@media (max-width: 1023px) {
+  .cx-layout {
+    grid-template-columns: 180px minmax(0, 1fr);
+  }
+
+  .cx-main {
+    padding: 1.25rem 1rem;
+  }
+}
+
+/* Phones: the sections become a scrollable strip under the top bar. */
+@media (max-width: 720px) {
+  .cx-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+  }
+
+  .cx-nav {
+    padding: 0.5rem 1rem;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+  }
+
+  .cx-nav__list {
+    display: flex;
+    gap: 0.4rem;
+  }
+
+  .cx-nav__button {
+    width: auto;
+    min-height: 44px;
+    white-space: nowrap;
+  }
+
+  .cx-main {
+    padding: 1rem;
+  }
+
+  .cx-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

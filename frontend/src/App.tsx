@@ -1,17 +1,21 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Permission, type CurrentUser } from "./api/types";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
 import { LoginScreen } from "./auth/LoginScreen";
+import { CashierWorkspace } from "./cashier/CashierWorkspace";
+import { pendingOperations } from "./cashier/pendingOperations";
+import { canUseCashierWorkspace } from "./cashier/sections";
 import { KdsScreen } from "./kds/KdsScreen";
 import { PosScreen } from "./pos/PosScreen";
+import { setCashierWorkspace } from "./theme/theme";
 
-type Mode = "pos" | "kds";
+type Mode = "pos" | "kds" | "cashier";
 
 const MODE_KEY = "restaurantos.mode";
-const MODE_LABELS: Record<Mode, string> = { pos: "Waiter POS", kds: "Kitchen display" };
+const MODE_LABELS: Record<Mode, string> = { pos: "Waiter POS", kds: "Kitchen display", cashier: "Cashier" };
 
-/** The screens the user's permissions allow, the POS first. */
+/** The screens the user's permissions allow, the POS first, the cashier workspace last. */
 export function availableModes(user: CurrentUser): Mode[] {
   const permissions = new Set(user.permissions);
   const modes: Mode[] = [];
@@ -19,11 +23,19 @@ export function availableModes(user: CurrentUser): Mode[] {
     modes.push("pos");
   }
   if (permissions.has(Permission.PreparationsView)) modes.push("kds");
+  if (canUseCashierWorkspace(user)) modes.push("cashier");
   return modes;
 }
 
 function Root() {
   const { state } = useAuth();
+
+  // The cashier theme belongs to the cashier workspace only (while a
+  // session is restored it stays as index.html set it, to avoid a flash).
+  const anonymous = state.status === "anonymous";
+  useEffect(() => {
+    if (anonymous) setCashierWorkspace(false);
+  }, [anonymous]);
 
   switch (state.status) {
     case "restoring":
@@ -53,6 +65,15 @@ function Workspace({ token, user }: { token: string; user: CurrentUser }) {
     setMode(next);
   }
 
+  useEffect(() => {
+    setCashierWorkspace(mode === "cashier");
+  }, [mode]);
+
+  // Pending-operation upkeep (save unsaved records, persist expiry proven by
+  // server time) while someone is signed in, on every screen; stops at
+  // sign-out because this component unmounts.
+  useEffect(() => pendingOperations.startUpkeep(), []);
+
   const nav =
     modes.length > 1 ? (
       <nav className="modes" aria-label="Screens">
@@ -72,6 +93,7 @@ function Workspace({ token, user }: { token: string; user: CurrentUser }) {
 
   if (mode === "pos") return <PosScreen token={token} user={user} nav={nav} />;
   if (mode === "kds") return <KdsScreen token={token} user={user} nav={nav} />;
+  if (mode === "cashier") return <CashierWorkspace token={token} user={user} nav={nav} />;
 
   return (
     <div className="app">
@@ -84,8 +106,8 @@ function Workspace({ token, user }: { token: string; user: CurrentUser }) {
       <section className="state">
         <h2 className="state__title">No screen for your role yet</h2>
         <p className="state__text">
-          {user.role ? `The ${user.role.name} role` : "Your account"} has no access to the waiter POS or the
-          kitchen display.
+          {user.role ? `The ${user.role.name} role` : "Your account"} has no access to the waiter POS, the
+          kitchen display or the cashier workspace.
         </p>
       </section>
     </div>
@@ -95,7 +117,7 @@ function Workspace({ token, user }: { token: string; user: CurrentUser }) {
 function readStoredMode(): Mode | null {
   try {
     const value = window.sessionStorage.getItem(MODE_KEY);
-    return value === "pos" || value === "kds" ? value : null;
+    return value === "pos" || value === "kds" || value === "cashier" ? value : null;
   } catch {
     return null;
   }

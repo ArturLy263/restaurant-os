@@ -7,7 +7,7 @@ import type {
   PreparationStatus,
   UnavailableReason,
 } from "../api/types";
-import { toCents } from "./money";
+import { toCents } from "../lib/money";
 
 export interface OrderSections {
   // Added but not sent yet: the next round.

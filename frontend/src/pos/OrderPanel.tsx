@@ -3,7 +3,7 @@ import { useState } from "react";
 import type { MenuProduct, OrderDetail, OrderItem } from "../api/types";
 import { shortOrderId } from "../kds/queue";
 import { Stepper } from "./controls";
-import { formatCents, formatMoney } from "./money";
+import { formatCents, formatMoney } from "../lib/money";
 import {
   PREPARATION_LABELS,
   describeDestinations,
