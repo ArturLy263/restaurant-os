@@ -2,8 +2,8 @@
 
 Vite + React + TypeScript client for waiters (POS) and station displays
 (KDS). After sign-in the screen follows the user's permissions: waiters get
-the POS, kitchen and bar staff the KDS, and managers can switch between the
-two in the top bar. It talks to
+the POS, kitchen and bar staff the KDS, cashiers the cashier workspace, and
+managers can switch between them in the top bar. It talks to
 the FastAPI backend only through `/api`; in development the Vite server
 proxies `/api` (HTTP and WebSocket) to `http://127.0.0.1:8000`, so no CORS
 setup is needed.
@@ -66,6 +66,102 @@ Point the proxy elsewhere with `API_PROXY_TARGET=http://host:port npm run dev`.
 
 Orders opened by another waiter are read-only unless the user may manage
 all orders (managers).
+
+## Cashier workspace (Stage 3.2.1 foundation)
+
+Offered to users with a cashier section's permission (`cash_shifts:view`,
+`bills:view` or `cash_reports:view`); managers switch to it in the top bar.
+
+- **Sections** — Overview, Orders, Payments, Cash Register, Reports and
+  Settings. Each is shown only when `/me` lists the permissions its
+  endpoints need (`cashier/sections.ts`); the backend still checks every
+  request, and a 403 shows a "No access" state. Only Overview and Settings
+  are functional so far; the others are placeholders.
+- **Overview** — `GET /api/v1/cash/register` every 15 s while the section
+  is shown and the tab is visible: register, business day, shift, the
+  signed-in employee and the previous closing. Expected cash appears only
+  with `cash_drawer:view_expected` (cashiers count blind); the screen checks
+  the permission even though the backend already leaves the amount out.
+- **Pending operations** — `cashier/pendingOperations.ts` stores every
+  cashier mutation in `localStorage` (`restaurantos.cashier.pendingOperations.v2`;
+  records under the earlier `.v1` key are merged in and that key is removed
+  only after the new one was written) before sending it: user, restaurant,
+  path, body and its SHA-256, Idempotency-Key, status, revision. Rules:
+  - *Uncertainty is permanent*: once an attempt may have been committed
+    (network error, timeout, 5xx, a reload mid-request), the operation
+    stays *unknown* until the server answers a retry with success. A later
+    401/403/4xx comes from checks that run before the backend looks the key
+    up, so it never downgrades the operation, and it cannot be dismissed.
+  - *No cross-tab loss*: every write re-reads storage and merges by id
+    (deterministically: revision, safer status, then a total order), under
+    a Web Lock where the browser has them. Uncertainty, checks, server
+    confirmations and expiry survive every merge.
+  - *Tombstones*: a dismissal (of something that certainly changed nothing)
+    never deletes a copy in doubt or newer than it; a retention removal (a
+    resolved record purged after 7 days) supersedes every older copy, so a
+    stale tab cannot bring it — or its body — back.
+  - *Live vs abandoned*: the sending tab holds a per-operation Web Lock and
+    refreshes a heartbeat every 10 s. With Web Locks a request whose lock
+    is free may be retried at once (e.g. after a reload); for up to 90 s
+    after its last heartbeat it is shown as *outcome being recovered* (its
+    tab may hold a server answer it could not save) and cannot be checked
+    or dismissed. Tabs also tell each other about server confirmations
+    over `BroadcastChannel` where available. Without Web Locks a request
+    counts as abandoned after 90 s without a heartbeat.
+  - *Without Web Locks* (e.g. plain HTTP, where `navigator.locks` does not
+    exist) nothing on the frontend makes two tabs mutually exclusive, and
+    two tabs of the same employee may send the same stored request at the
+    same moment. Safety then rests on the backend's idempotency contract
+    (`backend/app/api/idempotency.py`): keys are scoped to the user, a
+    request whose key is in use by a request still running waits for it
+    and then replays its stored result, and the same key with a different
+    body is refused (422). Both tabs send the identical key and body, so
+    the operation runs at most once. This has not been exercised with real
+    browsers yet.
+  - *Retry window*: 20 h (the backend keeps keys 24 h). For anything that
+    may have been committed only server time counts: the record stores a
+    lower bound of the server time at creation, and a retry first reads
+    the `Date` header of a fresh `GET /api/v1/me` (`cache: "no-store"`; no
+    other response is used). No anchor or no fresh time means no retry; a
+    401 ends the session and sends nothing. The device clock never expires
+    such an operation, so clock corrections cannot shorten or extend it.
+    Expiry proven by server time is saved at once, deletes the body and is
+    permanent. Upkeep (saving unsaved records, expiry proven by server
+    time, purging finished records) runs every minute while someone is
+    signed in, on any screen, and stops at sign-out.
+  - *Clock assumption (operational, not verified by these tests)*: retry
+    authorization uses the API host's clock (`Date` header), while the
+    backend expires idempotency keys with PostgreSQL `now()` (the database
+    host's clock). The 20 h window leaves a 4 h margin before the backend's
+    24 h only if the API and database clocks differ by less than that
+    margin — keep both hosts time-synchronized. A server clock that steps
+    backwards stretches the effective window by the size of the step; the
+    design relies on such steps staying well within the margin.
+  - *Checks are records*: a manager (`cash_reports:view`, same restaurant)
+    can record a check of another employee's unknown operation — never of
+    their own; the store enforces it. It keeps who checked, when, a note
+    and the previous outcome, labelled as not confirmed by the server.
+  - *Confirmations*: a server success is never turned back into unknown;
+    if storage cannot take it, it is kept in the tab with a warning and
+    saved by the next upkeep.
+  - *Shared devices*: other employees' operations show only type, time and
+    who started them. Bodies are dropped once a retry is no longer
+    possible; confirmed, checked and refused records are purged after 7
+    days; unresolved ones are never purged or cleared by sign-out. No
+    tokens or card data are stored: credential and card field names are
+    refused in any spelling, and card numbers in text (grouped by spaces,
+    dots or dashes) or as numbers are refused.
+  - *No storage*: operations are kept in memory with a warning that stays
+    until a write to storage actually succeeds.
+  - *Browsers*: no regex lookbehind is used (Safari before 16.4 cannot parse
+    it, and one unparsable expression stops the whole bundle). The build
+    keeps Vite's default target.
+- **Theme** — Premium Dark by default, Light in Settings; remembered per
+  device and applied by an inline script in `index.html` before React
+  renders. It only restyles the cashier workspace (`<html
+  data-workspace="cashier">`), not the POS or the kitchen display.
+- **Money** — `src/lib/money.ts` (shared with the POS) converts API amounts
+  to integer cents; no float arithmetic.
 
 ## How the kitchen display works
 

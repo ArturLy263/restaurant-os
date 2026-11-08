@@ -1,3 +1,4 @@
+import { observeServerDate } from "./serverClock";
 import type { ApiErrorBody } from "./types";
 
 // Codes the client produces itself, for failures without a backend body.
@@ -121,6 +122,10 @@ export interface RequestOptions {
   // Sent as the Idempotency-Key header: a retry with the same key replays
   // the first result instead of repeating the change.
   idempotencyKey?: string;
+  // fetch cache mode (e.g. "no-store" for a request whose headers matter).
+  cache?: RequestCache;
+  // Sees the raw response (status and headers) before it is parsed.
+  onResponse?: (response: Response) => void;
 }
 
 /**
@@ -150,6 +155,7 @@ export async function apiRequest<T>(
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: options.signal,
+      ...(options.cache ? { cache: options.cache } : {}),
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
@@ -161,6 +167,9 @@ export async function apiRequest<T>(
       message: "Cannot reach the RestaurantOS server. Check the connection.",
     });
   }
+
+  observeServerDate(response.headers.get("Date"));
+  options.onResponse?.(response);
 
   if (!response.ok) {
     throw await toApiError(response);

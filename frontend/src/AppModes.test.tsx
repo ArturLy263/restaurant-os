@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { App, availableModes } from "./App";
 import { writeToken } from "./auth/tokenStorage";
+import { CASHIER } from "./test/cashierFixtures";
 import { KITCHEN_USER, STATION, fakeToken, jsonResponse, mockApi } from "./test/fixtures";
 import { MENU, TABLES, WAITER } from "./test/posFixtures";
 
@@ -18,7 +19,15 @@ describe("Screens by role", () => {
     expect(availableModes(WAITER)).toEqual(["pos"]);
     expect(availableModes(KITCHEN_USER)).toEqual(["kds"]);
     expect(availableModes(MANAGER)).toEqual(["pos", "kds"]);
-    expect(availableModes({ ...WAITER, permissions: ["orders:view", "bills:view"] })).toEqual([]);
+    expect(availableModes({ ...WAITER, permissions: ["orders:view"] })).toEqual([]);
+    // The cashier workspace needs a cashier section's permission.
+    expect(availableModes({ ...WAITER, permissions: ["orders:view", "bills:view"] })).toEqual(["cashier"]);
+    expect(availableModes(CASHIER)).toEqual(["cashier"]);
+    expect(availableModes({ ...MANAGER, permissions: [...MANAGER.permissions, ...CASHIER.permissions] })).toEqual([
+      "pos",
+      "kds",
+      "cashier",
+    ]);
   });
 
   it("takes a waiter straight to the tables, without a screen switch", async () => {

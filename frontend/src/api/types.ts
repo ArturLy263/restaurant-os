@@ -102,7 +102,7 @@ export interface ApiErrorBody {
 // A monetary amount as a decimal string ("12.50"; menu prices), or as a
 // JSON number (order item prices, until the Stage 2 contract change; see
 // docs/monetary-contract.md). Never do float arithmetic on it: see
-// pos/money.ts.
+// lib/money.ts.
 export type Money = string | number;
 
 export interface TableActiveOrder {
@@ -238,5 +238,28 @@ export const Permission = {
   OrdersAddItems: "orders:add_items",
   OrdersSend: "orders:send",
   OrdersCancelItems: "orders:cancel_items",
+  OrdersVoid: "orders:void",
   OrdersManageAll: "orders:manage_all",
+  PreparationsAllStations: "preparations:all_stations",
+  PreparationsDiscard: "preparations:discard",
+  BillsView: "bills:view",
+  BillsCreate: "bills:create",
+  BillsAdjust: "bills:adjust",
+  PaymentsCreate: "payments:create",
+  PaymentsRefund: "payments:refund",
+  BusinessDaysOpen: "business_days:open",
+  BusinessDaysOpenPast: "business_days:open_past",
+  BusinessDaysClose: "business_days:close",
+  CashShiftsView: "cash_shifts:view",
+  CashShiftsOpen: "cash_shifts:open",
+  CashShiftsClose: "cash_shifts:close",
+  CashMovementsCreate: "cash_movements:create",
+  // Expected cash and count differences; cashiers count blind.
+  CashDrawerViewExpected: "cash_drawer:view_expected",
+  CashHandoversSelfConfirm: "cash_handovers:self_confirm",
+  CashOpeningBalanceCorrect: "cash_opening_balance:correct",
+  CashReportsView: "cash_reports:view",
 } as const;
+
+// Mirrors backend app/core/permissions.Permission.
+export type PermissionName = (typeof Permission)[keyof typeof Permission];
