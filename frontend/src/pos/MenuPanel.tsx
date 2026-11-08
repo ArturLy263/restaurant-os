@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import type { Menu, MenuProduct } from "../api/types";
 import { Dialog, Stepper } from "./controls";
-import { formatCents, formatMoney } from "./money";
+import { formatCents, formatMoney } from "../lib/money";
 import { lineTotalCents, selectionProblems, unavailableLabel } from "./order";
 
 export interface ProductChoice {

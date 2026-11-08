@@ -34,3 +34,25 @@ export function formatCents(cents: number, currency: string): string {
 export function formatMoney(value: Money, currency: string): string {
   return formatCents(toCents(value), currency);
 }
+
+/**
+ * "12.50" for 1250 cents: the decimal string the API takes for amounts,
+ * built from the integer digits (no float division).
+ */
+export function centsToDecimal(cents: number): string {
+  if (!Number.isSafeInteger(cents)) throw new Error(`Not a whole number of cents: ${cents}`);
+  const sign = cents < 0 ? "-" : "";
+  const digits = String(Math.abs(cents)).padStart(3, "0");
+  return `${sign}${digits.slice(0, -2)}.${digits.slice(-2)}`;
+}
+
+/**
+ * An optional API amount for display: "—" when the server left it out
+ * (e.g. expected cash the viewer may not see), and the plain decimal when
+ * the currency is not known.
+ */
+export function formatAmount(value: Money | null | undefined, currency: string | null): string {
+  if (value === null || value === undefined) return "—";
+  const cents = toCents(value);
+  return currency ? formatCents(cents, currency) : centsToDecimal(cents);
+}
