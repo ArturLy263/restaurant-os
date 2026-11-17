@@ -1,6 +1,6 @@
 """The cashier module through the API: business days, the shared register's
 shifts and handovers, payments (cash, manual card, tips, splits), refunds
-and reports (docs/stage-3-cashier-plan.md)."""
+and reports (docs/archive/stage-3-cashier-plan.md)."""
 
 import uuid
 from datetime import date, datetime, timedelta

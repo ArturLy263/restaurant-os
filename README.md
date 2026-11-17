@@ -150,8 +150,6 @@ repository root.
    > for `admin@restaurantos.com` (and rolls back), and on a database
    > with other data but no demo admin it adds another demo restaurant
    > next to it. To start over, use a fresh database.
-   > (`backend/seed_modifiers.py` only adds the burger modifiers to
-   > databases seeded before `seed.py` included them.)
 
 6. Start the API:
 

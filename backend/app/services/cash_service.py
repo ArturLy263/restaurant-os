@@ -1,4 +1,4 @@
-"""Business days and the shared cash register (docs/stage-3-cashier-plan.md).
+"""Business days and the shared cash register (docs/archive/stage-3-cashier-plan.md).
 
 A business day is independent of cash shifts: shifts open, close and hand
 over the register within it while orders and payments go on. Every

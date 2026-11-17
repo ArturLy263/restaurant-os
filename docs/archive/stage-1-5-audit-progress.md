@@ -8,7 +8,7 @@ suite (disposable databases and `restaurant_os_test`).
 
 Last updated: 2026-10-30. **State: audit and implementation complete;
 C5 resolved by the owner (422 kept); waiting only on the first remote CI
-run.** The full report is `docs/stage-1-5-completion.md`.
+run.** The full report is `docs/archive/stage-1-5-completion.md`.
 
 ## Requirement status
 

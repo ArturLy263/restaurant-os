@@ -4,7 +4,7 @@ Revision ID: d9e4b2a7c6f1
 Revises: c7e1a5b9d3f8
 Create Date: 2026-11-01 10:00:00.000000
 
-The cashier module (Stage 3, docs/stage-3-cashier-plan.md, Revision 2):
+The cashier module (Stage 3, docs/archive/stage-3-cashier-plan.md, Revision 2):
 
 - business_days: the restaurant's trading days, one OPEN at a time,
   independent of cash shifts;
