@@ -57,15 +57,39 @@ flowchart LR
 ## Quick start
 
 ```bash
-cp .env.example .env              # then edit the values
+cp .env.example .env              # then set JWT_SECRET_KEY and DEMO_PASSWORD
 docker compose up -d postgres
 python3.14 -m venv .venv && source .venv/bin/activate
 pip install -r backend/requirements-test.txt -c backend/constraints.txt
 alembic upgrade head
-python backend/seed.py            # once, on an empty database
+python backend/seed_demo.py       # demo restaurant and accounts; safe to re-run
 uvicorn app.main:app --app-dir backend --reload   # docs at http://127.0.0.1:8000/docs
 pytest -m unit                    # no database needed
 ```
+
+Then sign in with one of the [demo accounts](#demo-accounts) and `DEMO_PASSWORD`.
+
+## Demo accounts
+
+`python backend/seed_demo.py` creates these accounts in the demo restaurant
+"RestaurantOS Demo Bistro". Every account signs in with the password you set
+in `DEMO_PASSWORD`; it is never printed or stored in plain text.
+
+| Email | Role | Stations |
+| --- | --- | --- |
+| `admin@demo.restaurantos.example` | `ADMIN` | all |
+| `manager@demo.restaurantos.example` | `MANAGER` | all |
+| `cashier1@demo.restaurantos.example` | `CASHIER` | none |
+| `cashier2@demo.restaurantos.example` | `CASHIER` | none |
+| `waiter@demo.restaurantos.example` | `WAITER` | serves dishes from every station |
+| `kitchen@demo.restaurantos.example` | `KITCHEN` | Kitchen |
+| `bar@demo.restaurantos.example` | `BAR` | Bar |
+
+The domain `demo.restaurantos.example` is reserved for documentation and
+examples ([RFC 2606](https://www.rfc-editor.org/rfc/rfc2606)): these
+addresses can never belong to a real mailbox. They exist only for local
+demonstration; never reuse `DEMO_PASSWORD` anywhere else. Two cashiers make
+the two-person cash handover possible to try.
 
 ## Project layout
 
@@ -79,7 +103,7 @@ backend/alembic/            database migrations
 backend/requirements.txt    pinned runtime dependencies
 backend/requirements-test.txt  pinned test dependencies (includes runtime)
 backend/constraints.txt     exact versions of all transitive dependencies
-backend/seed.py             demo data for an empty database (run once)
+backend/seed_demo.py        demo restaurant and accounts (idempotent, *_dev/*_demo databases only)
 backend/tests/              test suite
 backend/app/workers/        outbox delivery worker
 frontend/                   kitchen display (React + TypeScript), see frontend/README.md
@@ -114,9 +138,9 @@ repository root.
    | Variable | Used for |
    | --- | --- |
    | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | the Docker PostgreSQL container |
-   | `DATABASE_URL` | the API, Alembic and seed script (development database) |
+   | `DATABASE_URL` | the API, Alembic and the demo seed (development database; the seed requires a lowercase name ending in `_dev` or `_demo`) |
    | `JWT_SECRET_KEY` | signing access tokens; use a long random value |
-   | `ADMIN_PASSWORD` | password of the demo admin created by `seed.py` |
+   | `DEMO_PASSWORD` | password of every demo account created by `seed_demo.py` (minimum 8 characters, maximum 72 bytes) |
    | `TEST_DATABASE_URL` | optional, see [Tests](#tests) |
 
    Environment variables take precedence over `.env`.
@@ -136,20 +160,43 @@ repository root.
    alembic current
    ```
 
-5. Load the demo data (restaurant, admin user, menu, tables, kitchen
-   station, modifiers):
+5. Load the demo data:
 
    ```bash
-   python backend/seed.py
+   python backend/seed_demo.py --dry-run   # every check, then roll back
+   python backend/seed_demo.py
    ```
 
-   > **Warning:** `seed.py` is not safe to run repeatedly. Run it
-   > **once**, on a freshly migrated, empty database. It always inserts a
-   > new demo restaurant and never checks for or updates existing data:
-   > on an already seeded database it aborts with a duplicate-key error
-   > for `admin@restaurantos.com` (and rolls back), and on a database
-   > with other data but no demo admin it adds another demo restaurant
-   > next to it. To start over, use a fresh database.
+   It creates "RestaurantOS Demo Bistro": the [demo accounts](#demo-accounts),
+   a kitchen and a bar station (with the kitchen and bar accounts assigned),
+   tables 1–8, and a menu of 16 products in four categories with modifier
+   groups (one product is inactive, to show an unavailable item). It creates
+   no orders, bills, business days or cash shifts.
+
+   The seed is safe to run again: it creates only what is missing and never
+   updates or deletes anything. Existing rows that differ from the demo
+   definition are reported and left as they are, and the passwords of
+   existing accounts are never changed (to start over, recreate the
+   database). Before writing, it refuses unless:
+
+   - the database name in `DATABASE_URL` is lowercase letters, digits and
+     underscores ending in `_dev` or `_demo` (`*_test` databases are
+     always refused),
+   - the database the connection actually reached (`current_database()`)
+     is that database,
+   - the code has a single Alembic head and the database is migrated to
+     exactly that head, and
+   - `DEMO_PASSWORD` has at least 8 characters, at most 72 bytes, and is
+     not a placeholder.
+
+   `seed_demo()` runs the database and migration checks itself before it
+   locks or writes anything, so a direct call is guarded too. A conflict,
+   such as a demo email that belongs to another restaurant, aborts the run
+   with nothing written (exit code 3); a refusal exits with 2. Any other
+   error exits with 1 and is reported by its type only, since database
+   error messages can contain bound values such as password hashes.
+   Ctrl+C exits with 130, without a traceback. The name check is a
+   convention: never point `DATABASE_URL` at a database you care about.
 
 6. Start the API:
 
@@ -158,8 +205,8 @@ repository root.
    ```
 
    Check it with `curl http://127.0.0.1:8000/health`; the interactive API
-   docs are at <http://127.0.0.1:8000/docs>. Log in as
-   `admin@restaurantos.com` with `ADMIN_PASSWORD`.
+   docs are at <http://127.0.0.1:8000/docs>. Log in with a
+   [demo account](#demo-accounts) and `DEMO_PASSWORD`.
 
    The API delivers outbox events to station displays only with
    `OUTBOX_WEBSOCKET_DELIVERY=true` (see
@@ -259,8 +306,8 @@ user's role takes effect without a new token.
 | `events:view` | `GET /events` | | | | | ✓ |
 | `menu:manage`, `tables:manage` | none yet | | | | | ✓ |
 
-(Paths are under `/api/v1`.) `ADMIN` is the administrator role created by
-`seed.py`; it has every permission, like `MANAGER`. The policy lives in
+(Paths are under `/api/v1`.) `ADMIN` is the administrator role (the demo
+admin's role); it has every permission, like `MANAGER`. The policy lives in
 `backend/app/core/permissions.py`.
 
 - A missing permission is 403 `PERMISSION_DENIED`
@@ -292,8 +339,10 @@ user's role takes effect without a new token.
 - Kitchen and bar users work only the stations assigned to them (see
   [Station scope](#station-scope)).
 
-There is no API to manage roles or users yet; `seed.py` creates only the
-`ADMIN` role. Other roles are `roles` rows with the codes above.
+There is no API to manage roles or users yet; `backend/seed_demo.py`
+creates every role above with one or two demo accounts each (see
+[Demo accounts](#demo-accounts)). Roles are `roles` rows with the codes
+above.
 
 #### Station scope
 
@@ -1049,7 +1098,7 @@ strict, so a misspelled marker fails collection.
 Tests never touch the development database.
 
 - **Integration tests** use a separate database named after
-  `DATABASE_URL` with `_test` appended (e.g. `restaurant_os_test`), or
+  `DATABASE_URL` with `_test` appended (e.g. `restaurant_os_demo_test`), or
   `TEST_DATABASE_URL` if set; the name must end with `_test`. It is
   created and migrated automatically, and each test runs in a transaction
   that is rolled back. Concurrency tests

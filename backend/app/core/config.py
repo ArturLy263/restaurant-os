@@ -13,7 +13,6 @@ class Settings(BaseSettings):
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
-    admin_password: str
 
     # Outbox delivery worker (app.workers.outbox_worker); read by its
     # runner, and by the API only when OUTBOX_WEBSOCKET_DELIVERY is on.

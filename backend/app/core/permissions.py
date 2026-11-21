@@ -23,7 +23,7 @@ class RoleName(StrEnum):
     BAR = "BAR"
     CASHIER = "CASHIER"
     MANAGER = "MANAGER"
-    # Pre-existing administrator role (seed.py); has every permission.
+    # Administrator role (e.g. the demo admin of seed_demo.py); has every permission.
     ADMIN = "ADMIN"
 
 
