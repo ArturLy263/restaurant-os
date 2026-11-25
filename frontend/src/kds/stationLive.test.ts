@@ -5,6 +5,7 @@ import { orderSent, resyncRequired, statusChanged } from "../test/events";
 import { FakeWebSocket } from "../test/fakeSocket";
 import { STATION, queueItem } from "../test/fixtures";
 import {
+  FALLBACK_REFRESH_MS,
   RECONNECT_MAX_MS,
   SUBSCRIBE_TIMEOUT_MS,
   StationLiveQueue,
@@ -474,5 +475,98 @@ describe("StationLiveQueue stop", () => {
     live.stop();
     vi.advanceTimersByTime(RECONNECT_MAX_MS * 4);
     expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+});
+
+describe("StationLiveQueue fallback refresh", () => {
+  it("reloads the queue periodically while no live event has arrived (delivery off on the server)", async () => {
+    const { live, loads, fetchQueue } = await liveWith([queueItem({ id: "p1" })]);
+    expect(live.getSnapshot().live.status).toBe("connected");
+    expect(live.getSnapshot().fallback).toBe(true);
+
+    vi.advanceTimersByTime(FALLBACK_REFRESH_MS);
+    expect(fetchQueue).toHaveBeenCalledTimes(3);
+    loads[2].resolve([queueItem({ id: "p1" }), queueItem({ id: "p2" })]);
+    await settle();
+    expect(items(live.getSnapshot()).map((item) => item.id)).toEqual(["p1", "p2"]);
+    expect(live.getSnapshot().loadedAt).not.toBeNull();
+    live.stop();
+  });
+
+  it("stops refreshing once a live event arrives, without applying anything twice", async () => {
+    const item = queueItem({ id: "p1", status: "PENDING" });
+    const { live, socket, fetchQueue } = await liveWith([item]);
+    const event = statusChanged("evt-1", item, "PENDING", "IN_PROGRESS");
+    socket.receive(event);
+    socket.receive(event);
+    expect(live.getSnapshot().live.status).toBe("live");
+    expect(live.getSnapshot().fallback).toBe(false);
+    expect(items(live.getSnapshot()).map((item) => item.status)).toEqual(["IN_PROGRESS"]);
+
+    vi.advanceTimersByTime(FALLBACK_REFRESH_MS * 3);
+    expect(fetchQueue).toHaveBeenCalledTimes(2);
+    live.stop();
+  });
+
+  it("resumes refreshing while reconnecting after a live connection dropped", async () => {
+    const { live, socket, fetchQueue, loads } = await liveWith([queueItem({ id: "p1" })]);
+    socket.receive(resyncRequired());
+    await settle();
+    loads[2].resolve([queueItem({ id: "p1" })]);
+    await settle();
+    expect(live.getSnapshot().fallback).toBe(false);
+
+    socket.serverClose(1006);
+    expect(live.getSnapshot().live.status).toBe("reconnecting");
+    expect(live.getSnapshot().fallback).toBe(true);
+    const before = fetchQueue.mock.calls.length;
+    // The reconnect attempt (1 s) stays unanswered; the fallback still runs.
+    vi.advanceTimersByTime(FALLBACK_REFRESH_MS);
+    expect(fetchQueue.mock.calls.length).toBe(before + 1);
+    live.stop();
+  });
+
+  it("does not refresh a hidden display, nor after access was refused", async () => {
+    const loads: Array<(items: PreparationQueueItem[]) => void> = [];
+    const fetchQueue = vi.fn(() => new Promise<PreparationQueueItem[]>((resolve) => loads.push(resolve)));
+    let visible = false;
+    const live = new StationLiveQueue({
+      stationId: STATION.id,
+      token: TOKEN,
+      url: URL,
+      fetchQueue,
+      createSocket: (url) => new FakeWebSocket(url),
+      onLoadError: vi.fn(),
+      onAuthExpired: vi.fn(),
+      random: () => 1,
+      isVisible: () => visible,
+    });
+    live.start();
+    loads[0]([]);
+    await settle();
+    vi.advanceTimersByTime(FALLBACK_REFRESH_MS);
+    expect(fetchQueue).toHaveBeenCalledTimes(1);
+
+    visible = true;
+    vi.advanceTimersByTime(FALLBACK_REFRESH_MS);
+    expect(fetchQueue).toHaveBeenCalledTimes(2);
+    loads[1]([]);
+    await settle();
+
+    const socket = FakeWebSocket.latest();
+    socket.accept();
+    socket.serverClose(4403);
+    expect(live.getSnapshot().live.status).toBe("offline");
+    expect(live.getSnapshot().fallback).toBe(false);
+    vi.advanceTimersByTime(FALLBACK_REFRESH_MS * 2);
+    expect(fetchQueue).toHaveBeenCalledTimes(2);
+    live.stop();
+  });
+
+  it("stops the timer when stopped", async () => {
+    const { live, fetchQueue } = await liveWith([]);
+    live.stop();
+    vi.advanceTimersByTime(FALLBACK_REFRESH_MS * 3);
+    expect(fetchQueue).toHaveBeenCalledTimes(2);
   });
 });

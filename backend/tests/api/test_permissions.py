@@ -103,12 +103,18 @@ ENDPOINTS = [
      "cash_shifts:close", {"CASHIER"} | MANAGEMENT),
     ("POST", f"/api/v1/cash/shifts/{_ID}/opening-corrections", {"opening_amount": "1.00", "reason": "x"},
      "cash_opening_balance:correct", MANAGEMENT),
+    # Explaining a recorded count afterwards: the closer (cashiers close
+    # shifts) or the incoming cashier (cashiers open shifts), or management.
+    ("POST", f"/api/v1/cash/shifts/{_ID}/closing-explanation", {"explanation": "x"},
+     "cash_shifts:close", {"CASHIER"} | MANAGEMENT),
+    ("POST", f"/api/v1/cash/shifts/{_ID}/handover-explanation", {"explanation": "x"},
+     "cash_shifts:open", {"CASHIER"} | MANAGEMENT),
     ("POST", f"/api/v1/cash/shifts/{_ID}/movements", {"type": "CASH_IN", "amount": "1.00", "reason": "x"},
      "cash_movements:create", {"CASHIER"} | MANAGEMENT),
 ]
 
 PUBLIC_ROUTES = {("POST", "/api/v1/auth/login"), ("GET", "/health")}
-AUTHENTICATED_ONLY_ROUTES = {("GET", "/api/v1/me")}
+AUTHENTICATED_ONLY_ROUTES = {("GET", "/api/v1/me"), ("POST", "/api/v1/auth/logout")}
 
 # Permissions without an endpoint of their own: orders:manage_all lifts the
 # creator-only order rule; preparations:all_stations lifts station scope

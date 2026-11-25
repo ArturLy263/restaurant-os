@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { isApiError } from "../api/client";
 import { getStations, updatePreparation } from "../api/endpoints";
@@ -8,7 +8,7 @@ import { ErrorState, LoadingState } from "../ui/States";
 import { QueueBoard } from "./QueueBoard";
 import { StationPicker } from "./StationPicker";
 import { nextAction } from "./queue";
-import { useStationLiveQueue, type Load, type LiveStatus } from "./stationLive";
+import { FALLBACK_REFRESH_MS, useStationLiveQueue, type Load, type LiveStatus } from "./stationLive";
 
 const STATION_KEY = "restaurantos.stationId";
 // How often elapsed times are recomputed (not a refetch).
@@ -148,7 +148,12 @@ function StationQueue({ token, station, permissions, onLeave }: StationQueueProp
     return () => window.clearInterval(timer);
   }, []);
 
+  // Taps that arrive before the button is disabled must not send the step twice.
+  const inFlight = useRef(new Set<string>());
+
   async function handleAction(item: PreparationQueueItem) {
+    if (inFlight.current.has(item.id)) return;
+    inFlight.current.add(item.id);
     const { action, label } = nextAction(item.status);
     setPendingIds((current) => new Set(current).add(item.id));
     setNotice(null);
@@ -158,6 +163,7 @@ function StationQueue({ token, station, permissions, onLeave }: StationQueueProp
       if (handleAuthError(error)) return;
       setNotice({ kind: "error", text: actionErrorMessage(error, label, item) });
     } finally {
+      inFlight.current.delete(item.id);
       setPendingIds((current) => {
         const next = new Set(current);
         next.delete(item.id);
@@ -195,7 +201,7 @@ function StationQueue({ token, station, permissions, onLeave }: StationQueueProp
         <span className="queue__summary">
           {queue.data.length} open {queue.data.length === 1 ? "item" : "items"}
         </span>
-        <LiveIndicator status={live.status} reason={live.reason} />
+        <LiveIndicator status={live.status} reason={live.reason} fallback={snapshot.fallback} loadedAt={snapshot.loadedAt} />
         <button
           type="button"
           className="button button--secondary"
@@ -260,25 +266,46 @@ const LIVE_LABELS: Record<LiveStatus, string> = {
   offline: "Live updates off",
 };
 
+const FALLBACK_SECONDS = Math.round(FALLBACK_REFRESH_MS / 1000);
+
 const LIVE_HINTS: Record<LiveStatus, string> = {
-  connecting: "Connecting to live updates; use Refresh meanwhile.",
+  connecting: `Connecting to live updates; meanwhile the queue refreshes every ${FALLBACK_SECONDS} s.`,
   connected:
     "Connected to the station's live updates, but none has arrived on this connection yet, " +
-    "so delivery is not confirmed. If the queue does not change as orders do, use Refresh.",
+    `so delivery is not confirmed; until one does, the queue also refreshes every ${FALLBACK_SECONDS} s.`,
   live: "Receiving live updates; the queue changes as orders do.",
-  reconnecting: "Live updates were interrupted; reconnecting. Use Refresh meanwhile.",
+  reconnecting: `Live updates were interrupted; reconnecting. Meanwhile the queue refreshes every ${FALLBACK_SECONDS} s.`,
   offline: "Live updates are off; use Refresh.",
 };
 
-function LiveIndicator({ status, reason }: { status: LiveStatus; reason: string | null }) {
-  const hint = reason ? `${reason} ${LIVE_HINTS[status]}` : LIVE_HINTS[status];
+function LiveIndicator({
+  status,
+  reason,
+  fallback,
+  loadedAt,
+}: {
+  status: LiveStatus;
+  reason: string | null;
+  fallback: boolean;
+  loadedAt: number | null;
+}) {
+  const base = status === "offline" && fallback ? `Live updates are off; the queue refreshes every ${FALLBACK_SECONDS} s.` : LIVE_HINTS[status];
+  const hint = reason ? `${reason} ${base}` : base;
   return (
     <span className={`live live--${status}`} role="status" title={hint}>
       <span className="live__dot" aria-hidden="true" />
       {LIVE_LABELS[status]}
+      {fallback && <span className="live__mode"> · auto-refresh</span>}
+      {loadedAt !== null && status !== "live" && (
+        <span className="live__time"> · updated {formatClockTime(loadedAt)}</span>
+      )}
       <span className="visually-hidden">. {hint}</span>
     </span>
   );
+}
+
+function formatClockTime(ms: number): string {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function readStoredStation(): string | null {

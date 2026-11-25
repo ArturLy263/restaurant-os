@@ -376,7 +376,7 @@ describe("Sending a round", () => {
 
     renderPos();
     const panel = await openTableTwo();
-    expect(within(panel).getByText("To 1 to Kitchen, 1 to Bar")).toBeTruthy();
+    expect(within(panel).getByText("Sends 1 to Kitchen, 1 to Bar")).toBeTruthy();
     const button = within(panel).getByRole("button", { name: "Send round · 2 items" });
 
     fireEvent.click(button);
@@ -491,5 +491,88 @@ describe("Sending a round", () => {
 
     expect(within(panel).getByText(/Lemonade cannot be sent: no station/)).toBeTruthy();
     expect(within(panel).getByRole("button", { name: /Send round/ }).hasAttribute("disabled")).toBe(true);
+  });
+});
+
+describe("Serving ready dishes", () => {
+  const READY = sentItem({
+    id: "item-ready",
+    product_id: BEER.id,
+    preparation: { id: "prep-ready", station_id: "bar", station_name: "Bar", status: "READY" },
+  });
+  const COOKING = sentItem({
+    id: "item-cooking",
+    product_id: BURGER.id,
+    preparation: { id: "prep-cooking", station_id: "kitchen", station_name: "Kitchen", status: "IN_PROGRESS" },
+  });
+  const SERVE = "POST /api/v1/preparations/prep-ready/serve";
+
+  it("marks a READY dish as served with an Idempotency-Key and shows the new status", async () => {
+    const served = { ...READY, preparation: { ...READY.preparation!, status: "SERVED" as const } };
+    const { calls } = mockApi({
+      "GET /api/v1/tables": [jsonResponse(TABLES)],
+      [ORDER]: [jsonResponse(order([READY, COOKING], { status: "SENT" })), jsonResponse(order([served, COOKING], { status: "SENT" }))],
+      "GET /api/v1/menu": [jsonResponse(MENU)],
+      [SERVE]: [jsonResponse({ id: "prep-ready", status: "SERVED" })],
+    });
+    renderPos();
+    const panel = await openTableTwo();
+
+    // Only the READY dish offers the action.
+    expect(within(panel).queryByRole("button", { name: /Mark served: .*Burger/ })).toBeNull();
+    fireEvent.click(await within(panel).findByRole("button", { name: /Mark served: 1× / }));
+
+    expect(await screen.findByText(/1× .* served/)).toBeTruthy();
+    const call = calls.find((c) => c.key === SERVE)!;
+    expect(header(call.init, "Idempotency-Key")).toBeTruthy();
+    await waitFor(() => expect(within(panel).queryByRole("button", { name: /Mark served/ })).toBeNull());
+    expect(within(panel).getAllByText("Served").length).toBeGreaterThan(0);
+  });
+
+  it("sends one request for a double tap", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const { calls } = mockApi({
+      "GET /api/v1/tables": [jsonResponse(TABLES)],
+      [ORDER]: [jsonResponse(order([READY], { status: "SENT" }))],
+      "GET /api/v1/menu": [jsonResponse(MENU)],
+      [SERVE]: [async () => {
+        await gate;
+        return jsonResponse({ id: "prep-ready", status: "SERVED" });
+      }],
+    });
+    renderPos();
+    const panel = await openTableTwo();
+    const button = await within(panel).findByRole("button", { name: /Mark served/ });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await act(async () => release());
+    await screen.findByText(/served$/);
+    expect(calls.filter((c) => c.key === SERVE)).toHaveLength(1);
+  });
+
+  it("explains a refusal, e.g. when the dish was already served elsewhere", async () => {
+    mockApi({
+      "GET /api/v1/tables": [jsonResponse(TABLES)],
+      [ORDER]: [jsonResponse(order([READY], { status: "SENT" }))],
+      "GET /api/v1/menu": [jsonResponse(MENU)],
+      [SERVE]: [errorResponse(409, "INVALID_PREPARATION_TRANSITION", "Invalid preparation transition: SERVED -> SERVED")],
+    });
+    renderPos();
+    const panel = await openTableTwo();
+    fireEvent.click(await within(panel).findByRole("button", { name: /Mark served/ }));
+    expect(await screen.findByText(/was not marked as served: Invalid preparation transition/)).toBeTruthy();
+  });
+
+  it("is not offered without preparations:serve", async () => {
+    mockApi({
+      "GET /api/v1/tables": [jsonResponse(TABLES)],
+      [ORDER]: [jsonResponse(order([READY], { status: "SENT" }))],
+      "GET /api/v1/menu": [jsonResponse(MENU)],
+    });
+    renderPos({ ...WAITER, permissions: WAITER.permissions.filter((p) => p !== "preparations:serve") });
+    const panel = await openTableTwo();
+    await within(panel).findByText("Ready");
+    expect(within(panel).queryByRole("button", { name: /Mark served/ })).toBeNull();
   });
 });

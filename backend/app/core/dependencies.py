@@ -17,6 +17,7 @@ from app.core.permissions import (
     station_type_for_role,
 )
 from app.db.dependencies import get_db
+from app.db.models.auth_security import RevokedToken
 from app.db.models.role import Role
 from app.db.models.station import Station
 from app.db.models.station_assignment import StationAssignment
@@ -38,13 +39,17 @@ class AuthenticatedToken:
     user: User
     # The token's `exp` (rejected from then on); None if it has none.
     expires_at: datetime | None
+    # The token's id (`jti`), revoked by sign-out.
+    jti: UUID
 
 
 def authenticate_token(db: Session, token: str) -> AuthenticatedToken:
     """The active user an access token belongs to.
 
     Raises ApiError 401 NOT_AUTHENTICATED for a missing, invalid, expired
-    or unknown-user token, and 403 USER_INACTIVE for an inactive user.
+    or unknown-user token, a token issued before the user's password last
+    changed (`ver` differs from users.token_version) and a revoked token
+    (its `jti` signed out); 403 USER_INACTIVE for an inactive user.
     Shared by HTTP requests and WebSocket connections.
     """
 
@@ -62,6 +67,8 @@ def authenticate_token(db: Session, token: str) -> AuthenticatedToken:
             token,
             settings.jwt_secret_key,
             algorithms=[settings.jwt_algorithm],
+            # Every issued token expires; one without `exp` is refused.
+            options={"require_exp": True},
         )
 
         user_id = payload.get("sub")
@@ -70,6 +77,10 @@ def authenticate_token(db: Session, token: str) -> AuthenticatedToken:
             raise credentials_exception
 
         user_uuid = UUID(user_id)
+        jti = UUID(payload["jti"])
+        token_version = payload["ver"]
+        if not isinstance(token_version, int) or isinstance(token_version, bool):
+            raise credentials_exception
 
         # Past `exp` values were already rejected by jwt.decode.
         exp = payload.get("exp")
@@ -79,12 +90,17 @@ def authenticate_token(db: Session, token: str) -> AuthenticatedToken:
             else datetime.fromtimestamp(int(exp), tz=timezone.utc)
         )
 
-    except (JWTError, ValueError, TypeError, OverflowError):
+    except (JWTError, ValueError, TypeError, OverflowError, KeyError):
+        # KeyError: a token without "jti" or "ver" (issued before
+        # revocation existed) is not accepted.
         raise credentials_exception
 
     user = db.get(User, user_uuid)
 
-    if user is None:
+    if user is None or user.token_version != token_version:
+        raise credentials_exception
+
+    if db.scalar(select(RevokedToken.jti).where(RevokedToken.jti == jti)) is not None:
         raise credentials_exception
 
     if not user.is_active:
@@ -94,7 +110,7 @@ def authenticate_token(db: Session, token: str) -> AuthenticatedToken:
             message="User is inactive",
         )
 
-    return AuthenticatedToken(user=user, expires_at=expires_at)
+    return AuthenticatedToken(user=user, expires_at=expires_at, jti=jti)
 
 
 @dataclass(frozen=True)

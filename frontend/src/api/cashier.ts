@@ -11,6 +11,8 @@ import type {
   CashRegister,
   CashShift,
   CloseShiftRequest,
+  CountExplanation,
+  CountExplanationRequest,
   CreatedBill,
   CreatePaymentRequest,
   EqualSplit,
@@ -107,6 +109,8 @@ export type CashierOperationType =
   | "cash_shift.close"
   | "cash_shift.handover"
   | "cash_shift.opening_correction"
+  | "cash_shift.closing_explanation"
+  | "cash_shift.handover_explanation"
   | "cash_movement.create"
   | "bill.create"
   | "bill.cancel_item"
@@ -143,6 +147,23 @@ export const cashierMutations = {
     mutation<OpeningCorrection>(
       "cash_shift.opening_correction",
       `${BASE}/cash/shifts/${id(shiftId)}/opening-corrections`,
+      request,
+      true,
+    ),
+
+  // Explain a recorded count's difference afterwards (the count is final).
+  explainClosing: (shiftId: string, request: CountExplanationRequest) =>
+    mutation<CountExplanation>(
+      "cash_shift.closing_explanation",
+      `${BASE}/cash/shifts/${id(shiftId)}/closing-explanation`,
+      request,
+      true,
+    ),
+
+  explainHandover: (shiftId: string, request: CountExplanationRequest) =>
+    mutation<CountExplanation>(
+      "cash_shift.handover_explanation",
+      `${BASE}/cash/shifts/${id(shiftId)}/handover-explanation`,
       request,
       true,
     ),

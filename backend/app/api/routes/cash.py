@@ -18,6 +18,8 @@ from app.db.dependencies import get_db
 from app.db.models.cash import BusinessDay
 from app.db.models.user import User
 from app.schemas.cash import (
+    CountExplanationRequest,
+    CountExplanationResponse,
     BusinessDayReportResponse,
     BusinessDayResponse,
     CashMovementRequest,
@@ -278,6 +280,74 @@ def hand_over_shift(
             closing_explanation=request.closing_explanation,
         )
         return cashier_views.shift_detail(db, CashService.get_shift(db, current_user.restaurant_id, shift_id), _viewer(auth))
+
+    return idempotency.run(run, payload=request)
+
+
+def _explanation_response(record) -> dict:
+    return {f: getattr(record, f) for f in (
+        "id", "cash_shift_id", "kind", "explanation", "user_id", "created_at",
+    )}
+
+
+@router.post(
+    "/shifts/{shift_id}/closing-explanation",
+    response_model=CountExplanationResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses=REQUIRED_IDEMPOTENCY_ROUTE_RESPONSES,
+)
+def explain_closing(
+    shift_id: uuid.UUID,
+    request: CountExplanationRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission(Permission.CASH_SHIFTS_CLOSE)),
+    auth: AuthContext = Depends(get_auth_context),
+    idempotency: RequiredIdempotency = Depends(),
+):
+    """Explain the counted difference of a closed shift, after the count
+    was recorded: by the cashier who counted it, or a manager. 409 when the
+    count needs no explanation or already has one; the business day cannot
+    close until every difference is explained."""
+
+    def run():
+        return _explanation_response(CashService.explain_closing(
+            db=db,
+            restaurant_id=current_user.restaurant_id,
+            user_id=current_user.id,
+            shift_id=shift_id,
+            explanation=request.explanation,
+            may_explain_any=Permission.CASH_DRAWER_VIEW_EXPECTED in auth.permissions,
+        ))
+
+    return idempotency.run(run, payload=request)
+
+
+@router.post(
+    "/shifts/{shift_id}/handover-explanation",
+    response_model=CountExplanationResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses=REQUIRED_IDEMPOTENCY_ROUTE_RESPONSES,
+)
+def explain_handover(
+    shift_id: uuid.UUID,
+    request: CountExplanationRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission(Permission.CASH_SHIFTS_OPEN)),
+    auth: AuthContext = Depends(get_auth_context),
+    idempotency: RequiredIdempotency = Depends(),
+):
+    """Explain the difference of the handover into `shift_id` (cash
+    received minus handed over): by the incoming cashier, or a manager."""
+
+    def run():
+        return _explanation_response(CashService.explain_handover(
+            db=db,
+            restaurant_id=current_user.restaurant_id,
+            user_id=current_user.id,
+            shift_id=shift_id,
+            explanation=request.explanation,
+            may_explain_any=Permission.CASH_DRAWER_VIEW_EXPECTED in auth.permissions,
+        ))
 
     return idempotency.run(run, payload=request)
 

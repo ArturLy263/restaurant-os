@@ -523,7 +523,7 @@ def test_the_application_needs_no_admin_password():
     Settings(
         _env_file=None,
         database_url="postgresql+psycopg://nobody:nothing@127.0.0.1:9/unreachable_test",
-        jwt_secret_key="test",
+        jwt_secret_key="unit-test-only-jwt-signing-key-4f9c2a",
     )
 
 

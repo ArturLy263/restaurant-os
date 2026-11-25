@@ -155,7 +155,10 @@ export const HEARTBEAT_MS = 10_000;
 // than this means the sending tab is gone.
 export const STALE_SENDING_MS = 90_000;
 // Confirmed, checked and refused records are kept this long, then purged.
-export const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+// Resolved records (confirmed, checked, refused) are kept this long for the
+// "Recent on this device" list, and removed at once when their employee
+// signs out (purgeResolvedOf): a shared till keeps as little as possible.
+export const RETENTION_MS = 12 * 60 * 60 * 1000;
 const TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const REFRESH_MS = 15_000;
 const UPKEEP_MS = 60_000;
@@ -1262,6 +1265,31 @@ export class PendingOperationStore {
       }
       operations.delete(id);
       removed[id] = { at: this.now().toISOString(), revision: op.revision, kind: "dismissed" };
+    });
+  }
+
+  /**
+   * Removes `user`'s resolved records from this device, e.g. at sign-out:
+   * confirmed and checked ones, and refusals that certainly changed
+   * nothing. Anything that may still need a retry or a check (pending,
+   * sending, unknown, or a failure that may have been committed) stays, so
+   * no money operation is ever forgotten. Returns how many were removed.
+   */
+  purgeResolvedOf(user: Pick<CurrentUser, "id">): Promise<number> {
+    return this.mutate((operations, removed) => {
+      const at = this.now().toISOString();
+      let count = 0;
+      for (const [id, op] of operations) {
+        if (op.userId !== user.id) continue;
+        const status = this.effectiveStatus(op);
+        const resolved =
+          status === "succeeded" || status === "checked" || (status === "failed" && !op.mayHaveCommitted);
+        if (!resolved) continue;
+        operations.delete(id);
+        removed[id] = { at, revision: op.revision, kind: "purged" };
+        count += 1;
+      }
+      return count;
     });
   }
 

@@ -94,6 +94,8 @@ export interface ApiErrorBody {
     code: string;
     message: string;
     request_id: string;
+    // Structured data some errors carry (e.g. blocking orders).
+    details?: unknown;
   };
 }
 

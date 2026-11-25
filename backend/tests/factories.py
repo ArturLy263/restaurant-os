@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from sqlalchemy.orm import Session
 
-from app.core.security import create_access_token, hash_password
+from app.core.security import access_token_for, hash_password
 from app.db.models.cash import BusinessDay, CashRegister, CashShift
 from app.db.models.category import Category
 from app.db.models.order import Order
@@ -105,11 +105,7 @@ def with_idempotency_key(headers: dict, key: str | None = None) -> dict:
 
 
 def auth_headers(user: User) -> dict[str, str]:
-    token = create_access_token(
-        user_id=user.id,
-        restaurant_id=user.restaurant_id,
-        role_id=user.role_id,
-    )
+    token = access_token_for(user)
 
     return {"Authorization": f"Bearer {token}"}
 

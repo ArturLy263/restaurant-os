@@ -33,6 +33,7 @@ def test_access_token_contains_user_claims():
         user_id=user_id,
         restaurant_id=restaurant_id,
         role_id=role_id,
+        token_version=3,
     )
 
     payload = jwt.decode(
@@ -43,6 +44,8 @@ def test_access_token_contains_user_claims():
 
     assert payload["sub"] == str(user_id)
     assert payload["restaurant_id"] == str(restaurant_id)
+    assert payload["ver"] == 3
+    assert uuid.UUID(payload["jti"])
     assert payload["role_id"] == str(role_id)
     assert "exp" in payload
 

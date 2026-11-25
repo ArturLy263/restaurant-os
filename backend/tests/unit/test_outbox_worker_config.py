@@ -21,7 +21,7 @@ UNREACHABLE_DATABASE_URL = "postgresql+psycopg://nobody:nothing@127.0.0.1:9/unre
 
 REQUIRED = {
     "database_url": UNREACHABLE_DATABASE_URL,
-    "jwt_secret_key": "test",
+    "jwt_secret_key": "unit-test-only-jwt-signing-key-4f9c2a",
 }
 
 
@@ -142,7 +142,7 @@ def test_importing_the_application_starts_no_worker():
     result = subprocess.run(
         [sys.executable, "-c", check],
         cwd=BACKEND,
-        env=isolated_env(JWT_SECRET_KEY="test"),
+        env=isolated_env(JWT_SECRET_KEY="unit-test-only-jwt-signing-key-4f9c2a"),
         capture_output=True,
         text=True,
         timeout=60,
@@ -167,7 +167,7 @@ def test_importing_the_application_starts_no_worker_even_when_enabled():
         [sys.executable, "-c", check],
         cwd=BACKEND,
         env=isolated_env(
-            JWT_SECRET_KEY="test",
+            JWT_SECRET_KEY="unit-test-only-jwt-signing-key-4f9c2a",
             OUTBOX_WEBSOCKET_DELIVERY="true",
         ),
         capture_output=True,

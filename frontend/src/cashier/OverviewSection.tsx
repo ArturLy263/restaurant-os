@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect } from "react";
 
 import type { BusinessDay, CashRegister, CashShift, PreviousClosing } from "../api/cashierTypes";
 import type { CurrentUser } from "../api/types";
@@ -6,17 +6,23 @@ import { formatClock } from "../kds/time";
 import { formatAmount } from "../lib/money";
 import { ErrorState, LoadingState } from "../ui/States";
 import { ForbiddenState } from "./CashierStates";
+import { Card, Chip, Facts, formatBusinessDate } from "./ui";
 import { canSeeExpectedCash } from "./sections";
 import { useRegister } from "./useRegister";
 
 interface OverviewSectionProps {
   token: string;
   user: CurrentUser;
+  onCurrency?(currency: string): void;
 }
 
 /** Read-only state of the register, the business day and the shift. */
-export function OverviewSection({ token, user }: OverviewSectionProps) {
+export function OverviewSection({ token, user, onCurrency }: OverviewSectionProps) {
   const { state, retry } = useRegister(token);
+  const shiftCurrency = state.status === "ready" ? (state.register.shift?.currency ?? null) : null;
+  useEffect(() => {
+    if (shiftCurrency) onCurrency?.(shiftCurrency);
+  }, [shiftCurrency, onCurrency]);
 
   if (state.status === "loading") return <LoadingState text="Loading the register…" />;
   if (state.status === "forbidden") return <ForbiddenState what="the register" onRetry={retry} />;
@@ -61,41 +67,6 @@ export function OverviewSection({ token, user }: OverviewSectionProps) {
         )}
       </div>
     </section>
-  );
-}
-
-function Card({ title, status, children }: { title: string; status?: ReactNode; children: ReactNode }) {
-  const id = `cx-card-${title.toLowerCase().replace(/\W+/g, "-")}`;
-  return (
-    <article className="cx-card" aria-labelledby={id}>
-      <header className="cx-card__header">
-        <h3 id={id} className="cx-card__title">
-          {title}
-        </h3>
-        {status}
-      </header>
-      {children}
-    </article>
-  );
-}
-
-function Chip({ tone, children }: { tone: "ok" | "off" | "warn"; children: ReactNode }) {
-  return <span className={`cx-chip cx-chip--${tone}`}>{children}</span>;
-}
-
-function Facts({ rows }: { rows: Array<[string, ReactNode] | null | false> }) {
-  return (
-    <dl className="cx-facts">
-      {rows.filter(Boolean).map((row) => {
-        const [label, value] = row as [string, ReactNode];
-        return (
-          <div key={label} className="cx-facts__row">
-            <dt>{label}</dt>
-            <dd>{value}</dd>
-          </div>
-        );
-      })}
-    </dl>
   );
 }
 
@@ -219,12 +190,4 @@ function PreviousClosingCard({
       )}
     </Card>
   );
-}
-
-/** "2026-11-08" as a local calendar date (no time-zone shift). */
-function formatBusinessDate(value: string): string {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  if (!match) return value;
-  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-  return date.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short", year: "numeric" });
 }

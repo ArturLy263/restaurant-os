@@ -26,7 +26,7 @@ export function LoginScreen({ notice }: { notice: string | null }) {
     <main className="login">
       <form className="login__panel" onSubmit={handleSubmit} noValidate>
         <h1 className="login__title">RestaurantOS</h1>
-        <p className="login__subtitle">Kitchen display</p>
+        <p className="login__subtitle">Waiter POS · kitchen and bar displays · cashier</p>
 
         {notice && !error && (
           <p className="banner banner--info" role="status">
@@ -84,6 +84,8 @@ function loginErrorMessage(error: unknown): string {
       return "Invalid email or password.";
     case "USER_INACTIVE":
       return "This account is inactive. Ask a manager to reactivate it.";
+    case "TOO_MANY_LOGIN_ATTEMPTS":
+      return "Too many sign-in attempts. Wait a few minutes, then try again.";
     case "VALIDATION_ERROR":
       return "Enter a valid email address and password.";
     default:

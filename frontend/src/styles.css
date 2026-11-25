@@ -416,6 +416,12 @@ button {
   white-space: nowrap;
 }
 
+.live__mode,
+.live__time {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
 .live__dot {
   width: 0.6rem;
   height: 0.6rem;
@@ -1413,12 +1419,18 @@ button {
 
 .cx-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  /* Cards narrower than ~300px squeeze label/value pairs into columns;
+     min(100%, …) keeps one card from overflowing a narrow screen. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
   gap: 1rem;
 }
 
 .cx-card {
   display: grid;
+  /* A shrinkable column: an implicit auto track grows to its content's
+     min-content width and pushes chips and values into the padding. */
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   align-content: start;
   gap: 0.75rem;
   padding: 1.1rem 1.25rem;
@@ -1430,9 +1442,10 @@ button {
 
 .cx-card__header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
+  gap: 0.4rem 0.75rem;
 }
 
 .cx-card__title {
@@ -1445,11 +1458,13 @@ button {
 
 .cx-card__text {
   color: var(--text);
+  overflow-wrap: anywhere;
 }
 
 .cx-card__hint {
   color: var(--text-muted);
   font-size: 0.85rem;
+  overflow-wrap: anywhere;
 }
 
 .cx-chip {
@@ -1481,10 +1496,13 @@ button {
   margin: 0;
 }
 
+/* Label and value share a line when they fit; otherwise the value moves
+   to its own line (right-aligned) instead of both breaking into columns. */
 .cx-facts__row {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.1rem 1rem;
 }
 
 .cx-facts dt {
@@ -1492,40 +1510,18 @@ button {
 }
 
 .cx-facts dd {
+  flex: 1 1 auto;
+  min-width: 0;
   margin: 0;
   font-weight: 600;
   text-align: right;
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
 .cx-note {
   color: var(--text-muted);
   font-weight: 400;
-}
-
-.cx-placeholder {
-  display: grid;
-  gap: 0.5rem;
-  justify-items: start;
-  padding: 2rem;
-  border: 1px dashed var(--border);
-  border-radius: 14px;
-  background: var(--surface);
-}
-
-.cx-placeholder__badge {
-  padding: 0.1rem 0.6rem;
-  border-radius: 999px;
-  background: var(--cx-accent-soft);
-  color: var(--pending);
-  font-size: 0.75rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.cx-placeholder__text {
-  color: var(--text-muted);
 }
 
 .cx-fieldset {
@@ -1596,6 +1592,11 @@ button {
   border: 1px solid var(--warning);
   border-radius: 12px;
   background: var(--cx-warning-soft);
+}
+
+.cx-pending--quiet {
+  border-color: var(--border);
+  background: var(--surface);
 }
 
 .cx-pending__warning {
@@ -1675,6 +1676,412 @@ button {
   width: min(420px, 100%);
 }
 
+/* Cashier sections: forms, tables, bills, reports */
+
+.cx-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+
+.cx-stack {
+  display: grid;
+  gap: 1rem;
+  align-content: start;
+  min-width: 0;
+}
+
+.cx-form__title {
+  font-size: 1.1rem;
+}
+
+.cx-form__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.75rem;
+}
+
+.cx-form__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.cx-form__actions--start {
+  justify-content: flex-start;
+}
+
+.cx-segmented {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.5rem;
+}
+
+.cx-segmented--compact {
+  display: inline-grid;
+  grid-template-columns: repeat(2, auto);
+}
+
+.cx-segmented--compact .cx-option {
+  min-height: 44px;
+  padding: 0.4rem 0.9rem;
+}
+
+.cx-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.cx-amount {
+  font-variant-numeric: tabular-nums;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.cx-field-error {
+  color: var(--danger);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.cx-field-hint {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.field__input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.cx-form--attention {
+  border-color: var(--warning);
+}
+
+.cx-confirm {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--warning);
+  border-radius: var(--radius);
+  background: var(--cx-warning-soft);
+}
+
+.cx-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: var(--touch);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.cx-checkbox input {
+  width: 22px;
+  height: 22px;
+  accent-color: var(--pending);
+}
+
+.cx-link {
+  border: none;
+  padding: 0;
+  background: none;
+  color: var(--pending);
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.cx-money,
+.cx-table__num {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cx-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.cx-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.cx-table th,
+.cx-table td {
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.cx-table thead th {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.cx-table tbody tr:last-child th,
+.cx-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.cx-table tbody th {
+  font-weight: 700;
+}
+
+.cx-table th.cx-table__num,
+.cx-table td.cx-table__num {
+  text-align: right;
+}
+
+.cx-table__strong {
+  font-weight: 800;
+}
+
+.cx-table__sub {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
+.cx-table__action {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.cx-table--rows tbody tr:hover {
+  background: var(--surface-raised);
+}
+
+.cx-lines {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cx-lines__item {
+  display: grid;
+  grid-template-columns: 2.5rem minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.cx-lines__item--cancelled {
+  opacity: 0.55;
+}
+
+.cx-lines__item--cancelled .cx-lines__name,
+.cx-lines__item--cancelled .cx-lines__price {
+  text-decoration: line-through;
+}
+
+.cx-lines__qty {
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.cx-lines__name {
+  font-weight: 600;
+}
+
+.cx-lines__sub {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 400;
+}
+
+.cx-lines__price {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.cx-due {
+  display: grid;
+  gap: 0.25rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--pending);
+  border-radius: 14px;
+  background: var(--cx-accent-soft);
+}
+
+.cx-due--paid {
+  border-color: var(--ready);
+  background: color-mix(in srgb, var(--ready) 12%, transparent);
+}
+
+.cx-due__label {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.cx-due__value {
+  font-size: 2rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.cx-due__hint {
+  color: var(--text-muted);
+}
+
+.cx-split {
+  display: grid;
+  gap: 0.75rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.cx-split__row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.cx-shares {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cx-share {
+  width: 100%;
+  display: grid;
+  gap: 0.15rem;
+  min-height: var(--touch);
+  padding: 0.5rem 0.75rem;
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.cx-share--current {
+  border-color: var(--pending);
+  background: var(--cx-accent-soft);
+}
+
+.cx-share--paid {
+  border-style: dashed;
+  opacity: 0.6;
+  cursor: default;
+}
+
+.cx-share__label {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.cx-share__value {
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.cx-share__paid {
+  color: var(--ready);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.cx-change {
+  padding: 0.6rem 0.9rem;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--ready) 12%, transparent);
+  font-size: 1.05rem;
+}
+
+.cx-report-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+/* The business days: a strip above the report, so the report keeps the full width. */
+.cx-days__list {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0 0 0.25rem;
+  overflow-x: auto;
+  list-style: none;
+}
+
+.cx-days__button {
+  display: flex;
+  white-space: nowrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-height: 48px;
+  padding: 0 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cx-days__button--current {
+  border-color: var(--pending);
+  background: var(--cx-accent-soft);
+}
+
+.cx-card--wide {
+  grid-column: 1 / -1;
+}
+
+.cx-card--alert {
+  border-color: var(--warning);
+}
+
+.cx-blocking {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cx-blocking li {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.cx-total {
+  font-size: 1.6rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Tablets: a narrower section list. */
 @media (max-width: 1023px) {
   .cx-layout {
@@ -1717,5 +2124,18 @@ button {
 
   .cx-cards {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cx-columns,
+  .cx-report-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+}
+
+/* Phones: keep the KDS status short; the tooltip and screen-reader text keep the details. */
+@media (max-width: 600px) {
+  .live__time {
+    display: none;
   }
 }

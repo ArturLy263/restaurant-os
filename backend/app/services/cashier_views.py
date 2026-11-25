@@ -204,14 +204,18 @@ def bill_detail(db: Session, restaurant_id: uuid.UUID, bill_id: uuid.UUID) -> di
     }
 
 
-def _handover(handover: CashShiftHandover, names: dict, viewer: CashViewer) -> dict:
+def _handover(db: Session, handover: CashShiftHandover, names: dict, viewer: CashViewer) -> dict:
     # A handover exists only once the incoming cashier has counted, so its
     # counts are no longer secret; the previous expected cash still is.
+    reason = cash_ledger.handover_reason(db, handover)
     return {
         **{field: getattr(handover, field) for field in (
             "id", "cash_register_id", "business_day_id", "from_shift_id", "to_shift_id",
-            "handed_over_amount", "received_amount", "difference", "reason", "created_at",
+            "handed_over_amount", "received_amount", "difference", "created_at",
         )},
+        "reason": reason,
+        # Recorded counts only: the flag cannot be used to test a guess.
+        "explanation_required": handover.difference != 0 and reason is None,
         "previous_expected_amount": (
             handover.previous_expected_amount if viewer.sees_expected else None
         ),
@@ -225,7 +229,7 @@ def handovers(db: Session, rows: list[CashShiftHandover], viewer: CashViewer) ->
     names = cash_ledger.user_names(
         db, [h.outgoing_user_id for h in rows] + [h.incoming_user_id for h in rows]
     )
-    return [_handover(h, names, viewer) for h in rows]
+    return [_handover(db, h, names, viewer) for h in rows]
 
 
 def _handover_pending(db: Session, shift_id: uuid.UUID) -> bool:
@@ -234,6 +238,10 @@ def _handover_pending(db: Session, shift_id: uuid.UUID) -> bool:
     return db.scalar(
         select(CashShiftHandover.id).where(CashShiftHandover.from_shift_id == shift_id)
     ) is None
+
+
+def _closing_needs_explanation(db: Session, closing: CashShiftClosing) -> bool:
+    return closing.difference != 0 and cash_ledger.closing_explanation(db, closing) is None
 
 
 def _count_visible(db: Session, closing: CashShiftClosing, viewer: CashViewer) -> bool:
@@ -301,7 +309,7 @@ def shift_detail(db: Session, shift: CashShift, viewer: CashViewer) -> dict:
             }
             for m in shift.movements
         ],
-        "handover": _handover(handover, names, viewer) if handover else None,
+        "handover": _handover(db, handover, names, viewer) if handover else None,
         "closing": (
             {
                 "expected_amount": closing.expected_amount if expected else None,
@@ -309,7 +317,10 @@ def shift_detail(db: Session, shift: CashShift, viewer: CashViewer) -> dict:
                     closing.counted_amount if _count_visible(db, closing, viewer) else None
                 ),
                 "difference": closing.difference if expected else None,
-                "explanation": closing.explanation,
+                "explanation": cash_ledger.closing_explanation(db, closing),
+                # Whether the recorded count still needs an explanation; the
+                # count is final, so this cannot be used to test a guess.
+                "explanation_required": _closing_needs_explanation(db, closing),
                 "user": _user(names, closing.user_id),
                 "created_at": closing.created_at,
             }
@@ -346,6 +357,7 @@ def register_view(db: Session, restaurant_id: uuid.UUID, viewer: CashViewer) -> 
             "closed_at": previous.closed_at,
             "closed_by": _user(names, closing.user_id),
             "handover_pending": _handover_pending(db, previous.id),
+            "explanation_required": _closing_needs_explanation(db, closing),
         }
     return {
         "register_id": register.id if register else None,

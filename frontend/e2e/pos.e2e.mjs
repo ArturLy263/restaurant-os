@@ -437,7 +437,7 @@ try {
     [["Bacon", "2.05"], ["Cheese", "1.10"], ["Medium", "0.00"]],
     "modifier snapshots",
   );
-  await waiter.waitText("To 1 to Kitchen, 1 to Bar");
+  await waiter.waitText("Sends 1 to Kitchen, 1 to Bar");
   log("Beer and Cola added; Beer 1→2→1 (€8.00, subtotal €42.10, back to €4.00); Cola removed; subtotal €35.30 — matches PostgreSQL");
 
   // Menu prices changing later must not change the order (snapshots).
@@ -476,7 +476,7 @@ try {
   await waiter.click("^Food$");
   await waiter.click("^Fries,");
   await waiter.waitText("Added 1× Fries");
-  await waiter.waitText("To 1 to Kitchen");
+  await waiter.waitText("Sends 1 to Kitchen");
   await waiter.click("^Send round · 1 item$");
   await waiter.waitText("Round sent: 1 to Kitchen.");
   await until("kitchen fries", async () => (await cook.tickets()).length === 2);

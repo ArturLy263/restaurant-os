@@ -11,6 +11,9 @@ export class ApiError extends Error {
   readonly code: string;
   readonly requestId: string | null;
   readonly detail: unknown;
+  // Structured data of the error envelope (`error.details`), e.g. the
+  // orders that keep a business day from closing.
+  readonly details: unknown;
 
   constructor(options: {
     status: number;
@@ -18,6 +21,7 @@ export class ApiError extends Error {
     message: string;
     requestId?: string | null;
     detail?: unknown;
+    details?: unknown;
   }) {
     super(options.message);
     this.name = "ApiError";
@@ -25,6 +29,7 @@ export class ApiError extends Error {
     this.code = options.code;
     this.requestId = options.requestId ?? null;
     this.detail = options.detail;
+    this.details = options.details;
   }
 
   get isUnauthorized(): boolean {
@@ -100,6 +105,7 @@ async function toApiError(response: Response): Promise<ApiError> {
       message: body.error.message,
       requestId: body.error.request_id ?? headerRequestId,
       detail: body.detail,
+      details: body.error.details,
     });
   }
 

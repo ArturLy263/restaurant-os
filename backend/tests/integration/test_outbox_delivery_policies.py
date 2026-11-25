@@ -537,9 +537,17 @@ def test_cleanup_rejects_unsafe_arguments(db_engine, options):
 
 
 def worker_connections(db_engine):
+    """The worker's connections to this test database. The runner under
+    test is only given this database; counting server-wide would also count
+    a developer's API running its own delivery thread against another
+    database on the same server, so this test would wait forever."""
+
     with db_engine.connect() as connection:
         return connection.scalar(
-            text("SELECT count(*) FROM pg_stat_activity WHERE application_name = :a"),
+            text(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE application_name = :a AND datname = current_database()"
+            ),
             {"a": APPLICATION_NAME},
         )
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { centsToDecimal, formatAmount, formatCents, formatMoney, toCents } from "./money";
+import { centsToDecimal, formatAmount, formatCents, formatMoney, toCents, parseAmountInput } from "./money";
 
 describe("toCents", () => {
   it("reads decimal strings exactly", () => {
@@ -72,5 +72,28 @@ describe("formatAmount", () => {
   it("formats with the currency when known, else as a plain decimal", () => {
     expect(formatAmount("40.5", "EUR")).toBe(formatCents(4050, "EUR"));
     expect(formatAmount("40.5", null)).toBe("40.50");
+  });
+});
+
+describe("parseAmountInput", () => {
+  it("reads typed amounts as integer cents", () => {
+    expect(parseAmountInput("12")).toBe(1200);
+    expect(parseAmountInput("12.5")).toBe(1250);
+    expect(parseAmountInput("12,05")).toBe(1205);
+    expect(parseAmountInput(" 0.10 ")).toBe(10);
+    expect(parseAmountInput("0")).toBe(0);
+    expect(parseAmountInput("99999999.99")).toBe(9999999999);
+  });
+
+  it("refuses anything the backend would refuse", () => {
+    for (const text of ["", "-1", "1.234", "1e3", "abc", "1.", ".5", "123456789", "12.50 EUR", "1 000"]) {
+      expect(parseAmountInput(text)).toBeNull();
+    }
+  });
+
+  it("never goes through floating point", () => {
+    // 0.1 + 0.2 style inputs stay exact.
+    expect(parseAmountInput("0.29")).toBe(29);
+    expect(parseAmountInput("1.15")).toBe(115);
   });
 });

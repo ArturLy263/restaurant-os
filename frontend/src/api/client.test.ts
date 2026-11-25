@@ -43,6 +43,29 @@ describe("apiRequest", () => {
     expect(apiError[flag]).toBe(true);
   });
 
+  it("keeps the structured details of an error envelope", async () => {
+    mockApi({
+      "POST /x": [
+        jsonResponse(
+          {
+            detail: "1 order(s) are still open",
+            error: { code: "BUSINESS_DAY_HAS_OPEN_ORDERS", message: "1 order(s) are still open", request_id: "r1", details: { orders: [{ order_id: "o1" }] } },
+          },
+          409,
+        ),
+      ],
+    });
+    const error = (await apiRequest("/x", { method: "POST" }).catch((caught: unknown) => caught)) as ApiError;
+    expect(error.code).toBe("BUSINESS_DAY_HAS_OPEN_ORDERS");
+    expect(error.details).toEqual({ orders: [{ order_id: "o1" }] });
+  });
+
+  it("has no details when the envelope carries none", async () => {
+    mockApi({ "GET /x": [errorResponse(404, "NOT_FOUND", "Not found")] });
+    const error = (await apiRequest("/x").catch((caught: unknown) => caught)) as ApiError;
+    expect(error.details).toBeUndefined();
+  });
+
   it("keeps the field errors of a validation error as detail", async () => {
     const detail = [{ loc: ["body", "email"], msg: "value is not a valid email address" }];
     mockApi({

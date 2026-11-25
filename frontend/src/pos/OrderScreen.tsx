@@ -8,6 +8,7 @@ import {
   getOrder,
   sendOrder,
   updateOrderItem,
+  updatePreparation,
 } from "../api/endpoints";
 import { Permission, type CurrentUser, type Menu, type MenuProduct, type OrderDetail, type OrderItem } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
@@ -163,13 +164,40 @@ export function OrderScreen({ token, user, open, onLeave }: OrderScreenProps) {
     track(setBusyProducts, product.id, false);
   }
 
-  async function changeItem(item: OrderItem, run: () => Promise<unknown>, failure: string) {
+  async function changeItem(item: OrderItem, run: () => Promise<unknown>, failure: string, success: string | null = null) {
     const key = `item:${item.id}`;
     if (!claim(key)) return;
     track(setBusyItems, item.id, true);
-    await change(run, null, failure);
+    await change(run, success, failure);
     inFlight.current.delete(key);
     track(setBusyItems, item.id, false);
+  }
+
+  // One key per dish being served: a repeated tap or a retry after a lost
+  // answer is replayed by the backend instead of failing as a second step.
+  const serveKeys = useRef(new Map<string, string>());
+
+  function serve(item: OrderItem) {
+    const preparation = item.preparation;
+    if (!preparation) return;
+    const key = serveKeys.current.get(preparation.id) ?? newIdempotencyKey();
+    serveKeys.current.set(preparation.id, key);
+    const name = itemName(item, products);
+    void changeItem(
+      item,
+      async () => {
+        try {
+          await updatePreparation(token, preparation.id, "serve", key);
+          serveKeys.current.delete(preparation.id);
+        } catch (error) {
+          // A refusal is final (the key cannot help); a lost answer keeps it.
+          if (!(isApiError(error) && error.isNetworkError)) serveKeys.current.delete(preparation.id);
+          throw error;
+        }
+      },
+      `${name} was not marked as served`,
+      `${item.quantity}× ${name} served`,
+    );
   }
 
   async function send(current: OrderDetail) {
@@ -294,6 +322,7 @@ export function OrderScreen({ token, user, open, onLeave }: OrderScreenProps) {
             )
           }
           onSend={() => void send(current)}
+          onServe={user.permissions.includes(Permission.PreparationsServe) ? serve : undefined}
         />
       </div>
     </main>
