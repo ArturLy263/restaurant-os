@@ -135,12 +135,15 @@ def test_two_party_handover_of_150(open_till, received, difference):
     till.ok(till.call("POST", path, json={"type": "CASH_IN", "amount": "50.00", "reason": "Float"}), 201)
     till.ok(till.call("POST", f"/api/v1/cash/shifts/{till.shift['id']}/handover", till.cashier, {"counted_amount": "150.00"}))
 
+    # Recorded whatever was counted: no refusal reveals either count.
+    incoming = till.ok(till.open_shift(received, user=till.cashier2), 201)
+    assert incoming["handover"]["explanation_required"] is (difference != "0.00")
     if difference != "0.00":
-        error = till.error(till.open_shift(received, user=till.cashier2), 422, "HANDOVER_REASON_REQUIRED")
-        # Blind: neither count is revealed by the refusal.
-        assert "150" not in error["message"] and received not in error["message"]
-        assert till.register()["shift"] is None
-    incoming = till.ok(till.open_shift(received, "Counted twice" if difference != "0.00" else None, user=till.cashier2), 201)
+        till.ok(till.call(
+            "POST", f"/api/v1/cash/shifts/{incoming['id']}/handover-explanation", till.cashier2,
+            {"explanation": "Counted twice"},
+        ), 201)
+        incoming = till.shift_view(incoming["id"], till.cashier2)
 
     handover = incoming["handover"]
     assert (handover["handed_over_amount"], handover["received_amount"], handover["difference"]) == ("150.00", received, difference)

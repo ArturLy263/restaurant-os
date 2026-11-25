@@ -1,4 +1,4 @@
-# RestaurantOS waiter POS and kitchen display (frontend)
+# RestaurantOS frontend: waiter POS, kitchen and bar displays, cashier workspace
 
 Vite + React + TypeScript client for waiters (POS) and station displays
 (KDS). After sign-in the screen follows the user's permissions: waiters get
@@ -30,6 +30,9 @@ Point the proxy elsewhere with `API_PROXY_TARGET=http://host:port npm run dev`.
 | `npm run preview`   | Serve the production build (also proxies `/api`) |
 | `npm run e2e`       | Browser test in headless Chrome (see below)   |
 | `npm run e2e:pos`   | Real-stack POS + KDS acceptance (see below)   |
+| `npm run screenshots` | README screenshots from the whole demo on a disposable database (see the root README) |
+| `npm run e2e:csp`   | Production build under its Content-Security-Policy in headless Chrome (mock API) |
+| `npm run csp:print` | Print the security headers a production host must send (from `csp.ts`) |
 
 ## Waiter POS
 
@@ -50,6 +53,11 @@ Point the proxy elsewhere with `API_PROXY_TARGET=http://host:port npm run dev`.
    (`PATCH`), note (`PATCH`) and remove (`POST …/cancel`) apply to them
    only. **Send round** sends them all in one request and reports where
    they went; items already sent show their station and preparation status.
+   A dish the station marked *Ready* gets a **Served** button for users with
+   `preparations:serve` (waiters serve from every station):
+   `POST /api/v1/preparations/{id}/serve` with an `Idempotency-Key` that is
+   kept while the answer is unknown, so a repeated tap replays instead of
+   failing.
 5. **No duplicates** — every change carries a new `Idempotency-Key`;
    buttons are disabled while a request runs, and taps on a product, an
    item or Send that arrive before the screen re-renders are ignored. If
@@ -60,14 +68,27 @@ Point the proxy elsewhere with `API_PROXY_TARGET=http://host:port npm run dev`.
    When the tables or the order cannot be reloaded, the screen keeps what
    it shows and says that it may be out of date until a reload succeeds.
 6. **Money** — amounts are converted to integer cents before any
-   arithmetic (`src/pos/money.ts`); menu prices arrive as decimal strings,
+   arithmetic (`src/lib/money.ts`); menu prices arrive as decimal strings,
    order item prices still as JSON numbers (see
    `docs/monetary-contract.md`).
 
 Orders opened by another waiter are read-only unless the user may manage
 all orders (managers).
 
-## Cashier workspace (Stage 3.2.1 foundation)
+## Security
+
+- **Content-Security-Policy:** `csp.ts` derives it from `index.html`
+  (the inline theme script is allowed by its sha256 hash, nothing else
+  inline). `vite preview` sends it with the other security headers;
+  `npm run e2e:csp` checks the real build under it in Chrome. The dev
+  server sends no CSP: Vite's dev client needs inline scripts.
+- **Sign-out** revokes the token on the server (`POST /api/v1/auth/logout`,
+  best effort) and removes the user's resolved cashier records from this
+  device. An expired or refused session just ends.
+- **Sign-in throttling** (429) shows a neutral "wait a few minutes"
+  message. See `docs/security.md` for the server side.
+
+## Cashier workspace
 
 Offered to users with a cashier section's permission (`cash_shifts:view`,
 `bills:view` or `cash_reports:view`); managers switch to it in the top bar.
@@ -75,8 +96,36 @@ Offered to users with a cashier section's permission (`cash_shifts:view`,
 - **Sections** — Overview, Orders, Payments, Cash Register, Reports and
   Settings. Each is shown only when `/me` lists the permissions its
   endpoints need (`cashier/sections.ts`); the backend still checks every
-  request, and a 403 shows a "No access" state. Only Overview and Settings
-  are functional so far; the others are placeholders.
+  request, and a 403 shows a "No access" state.
+- **Orders** — `GET /api/v1/cashier/orders` (to pay / settled, refreshed
+  every 20 s): table, status, waiter, paid and due as the server computes
+  them. "Create bill" (`bills:create`) for a sent order, then the bill opens
+  in Payments.
+- **Payments** — `GET /api/v1/bills/{id}`: lines, totals and the amount
+  due. Cash or card (card only after the cashier confirms the terminal
+  approved it; an optional receipt number, never card data), optional tip,
+  partial payments, and an equal split (`GET …/split?parts=`) whose shares
+  are paid one by one. Change is worked out on the device from the cash
+  received and never sent; amounts are integer cents (`lib/money`), never
+  floats.
+- **Cash Register** — open the business day and a shift (counted opening
+  cash); count blind to close the shift or hand it over; the next cashier
+  confirms a handover by counting and opening their shift (the outgoing
+  cashier cannot, unless they hold `cash_handovers:self_confirm`); cash in
+  / out with a reason; the shift's movements and recent handovers. A count
+  the server finds different asks for an explanation (or a handover
+  reason) and is sent again; expected cash and differences appear only with
+  `cash_drawer:view_expected`.
+- **Reports** (`cash_reports:view`) — business days, each day's report
+  (revenue, tips and refunds by method; shift drawers, counts and
+  differences; handovers), live while the day is open and frozen once
+  closed. Closing the day (`business_days:close`) is confirmed first; a
+  refusal lists the orders still open.
+- **Writes** go through `cashier/useCashierOperation.ts`: every mutation is
+  stored as a pending operation before it is sent, a double click sends
+  once, a refusal is shown at the form (and removed, since it changed
+  nothing), and an unknown outcome stays in the unresolved-operations
+  banner for a retry with the same key.
 - **Overview** — `GET /api/v1/cash/register` every 15 s while the section
   is shown and the tab is visible: register, business day, shift, the
   signed-in employee and the previous closing. Expected cash appears only
@@ -98,7 +147,8 @@ Offered to users with a cashier section's permission (`cash_shifts:view`,
     confirmations and expiry survive every merge.
   - *Tombstones*: a dismissal (of something that certainly changed nothing)
     never deletes a copy in doubt or newer than it; a retention removal (a
-    resolved record purged after 7 days) supersedes every older copy, so a
+    resolved record purged after 12 hours, or when its employee signs out)
+    supersedes every older copy, so a
     stale tab cannot bring it — or its body — back.
   - *Live vs abandoned*: the sending tab holds a per-operation Web Lock and
     refreshes a heartbeat every 10 s. With Web Locks a request whose lock
@@ -203,6 +253,14 @@ Offered to users with a cashier section's permission (`cash_shifts:view`,
      4404 stop live updates for the station without retrying.
    - *Refresh* always works and the queue is still refetched after an
      action. The stream never triggers actions.
+   - **Fallback refresh** — while no event has arrived on the current
+     connection (*Connecting…*, *Connected*, *Reconnecting…*), the queue is
+     reloaded every 20 s, so a display never freezes when the API delivers
+     no events. It stops as soon as the stream is *Live*, pauses while the
+     display is hidden, and never runs after the stream was refused.
+     Reloads go through the same buffered load as `subscribed`, so events
+     are neither lost nor applied twice. The status shows "auto-refresh"
+     and the time of the last load while it runs.
 
    The toolbar status says only what the client can verify:
 
@@ -217,9 +275,9 @@ Offered to users with a cashier section's permission (`cash_shifts:view`,
    Events only flow while the API runs with `OUTBOX_WEBSOCKET_DELIVERY=true`
    (one API process; see the root README). With it off the stream still
    subscribes, and the protocol has no way to say whether delivery is on,
-   so the display stays *Connected*: an idle station and an API that
-   delivers nothing look the same until the first event arrives. Each new
-   connection starts at *Connected* again.
+   so the display stays *Connected* (refreshing every 20 s): an idle
+   station and an API that delivers nothing look the same until the first
+   event arrives. Each new connection starts at *Connected* again.
 5. **Actions** — Start / Ready / Serve call
    `POST /api/v1/preparations/{id}/start|ready|serve`. Buttons are hidden
    when `/me` lacks the permission (`preparations:update` or

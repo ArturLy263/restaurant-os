@@ -11,7 +11,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "node e2e/kds.e2e.mjs",
-    "e2e:pos": "node e2e/pos.e2e.mjs"
+    "e2e:pos": "node e2e/pos.e2e.mjs",
+    "e2e:csp": "node e2e/csp.e2e.mjs",
+    "csp:print": "node --experimental-strip-types e2e/print-csp.mjs",
+    "screenshots": "node e2e/screenshots.mjs"
   },
   "dependencies": {
     "react": "^19.3.1",

@@ -26,6 +26,11 @@ export interface LiveSnapshot {
   // A queue load is in flight.
   refreshing: boolean;
   live: { status: LiveStatus; reason: string | null };
+  // The queue is reloaded every FALLBACK_REFRESH_MS because live delivery
+  // is not confirmed on the current connection.
+  fallback: boolean;
+  // When the queue was last loaded successfully (ms since the epoch).
+  loadedAt: number | null;
 }
 
 /** The part of WebSocket the controller uses (a fake in tests). */
@@ -48,6 +53,9 @@ export interface StationLiveOptions {
   // The stream refused the token (4401): the session is over.
   onAuthExpired(): void;
   random?: () => number;
+  // Whether the display is visible; a hidden one is not refreshed.
+  isVisible?: () => boolean;
+  fallbackRefreshMs?: number;
 }
 
 export const RECONNECT_BASE_MS = 1_000;
@@ -56,6 +64,10 @@ export const RECONNECT_MAX_MS = 30_000;
 export const SUBSCRIBE_TIMEOUT_MS = 15_000;
 // Recently received event ids, kept across reconnects for deduplication.
 export const SEEN_EVENT_LIMIT = 500;
+// While no live event has arrived on the current connection (delivery off
+// on the server, reconnecting, or an idle station), the queue is reloaded
+// this often so the display never silently freezes. Stops once live.
+export const FALLBACK_REFRESH_MS = 20_000;
 
 const OFFLINE_REASONS: Record<number, string> = {
   [CloseCode.NotAuthenticated]: "Your session has expired.",
@@ -86,7 +98,13 @@ export class StationLiveQueue {
     queue: { status: "loading" },
     refreshing: false,
     live: { status: "connecting", reason: null },
+    fallback: true,
+    loadedAt: null,
   };
+  // The stream was refused for good (session, access, station): reloading
+  // cannot help either.
+  private refused = false;
+  private fallbackTimer: ReturnType<typeof setInterval> | null = null;
   private readonly listeners = new Set<() => void>();
   private readonly random: () => number;
 
@@ -125,12 +143,21 @@ export class StationLiveQueue {
     this.started = true;
     void this.reload();
     this.connect();
+    this.fallbackTimer = setInterval(() => this.fallbackTick(), this.options.fallbackRefreshMs ?? FALLBACK_REFRESH_MS);
+  }
+
+  private fallbackTick(): void {
+    if (this.stopped || !this.snapshot.fallback || this.loading) return;
+    if (this.options.isVisible && !this.options.isVisible()) return;
+    void this.reload();
   }
 
   /** Closes the stream and ignores every later result; final. */
   stop(): void {
     if (this.stopped) return;
     this.stopped = true;
+    if (this.fallbackTimer !== null) clearInterval(this.fallbackTimer);
+    this.fallbackTimer = null;
     this.clearReconnect();
     this.dropSocket();
     this.abort?.abort();
@@ -221,7 +248,7 @@ export class StationLiveQueue {
       items = result.items;
       if (result.reload) this.loadAgain = true;
     }
-    this.update({ queue: { status: "loaded", data: items } });
+    this.update({ queue: { status: "loaded", data: items }, ...(data !== null ? { loadedAt: Date.now() } : {}) });
   }
 
   private handleEvent(event: StationEvent): void {
@@ -315,12 +342,14 @@ export class StationLiveQueue {
     this.clearSubscribeTimer();
 
     if (code === CloseCode.NotAuthenticated) {
+      this.refused = true;
       this.setLive("offline", OFFLINE_REASONS[code]);
       this.options.onAuthExpired();
       return;
     }
     if (code === CloseCode.Forbidden || code === CloseCode.StationNotFound) {
       // Retrying does not help: the user's access or the station changed.
+      this.refused = true;
       this.setLive("offline", OFFLINE_REASONS[code]);
       return;
     }
@@ -368,7 +397,7 @@ export class StationLiveQueue {
   private setLive(status: LiveStatus, reason: string | null = null): void {
     const live = this.snapshot.live;
     if (live.status === status && live.reason === reason) return;
-    this.update({ live: { status, reason } });
+    this.update({ live: { status, reason }, fallback: status !== "live" && !this.refused });
   }
 
   private update(changes: Partial<LiveSnapshot>): void {
@@ -381,6 +410,8 @@ const INITIAL_SNAPSHOT: LiveSnapshot = {
   queue: { status: "loading" },
   refreshing: false,
   live: { status: "connecting", reason: null },
+  fallback: true,
+  loadedAt: null,
 };
 
 function subscribeNothing(): () => void {
@@ -411,6 +442,7 @@ export function useStationLiveQueue(options: UseStationLiveQueueOptions) {
       url: stationEventsUrl(stationId),
       fetchQueue: (signal) => getStationQueue(token, stationId, signal),
       createSocket: (url) => new WebSocket(url),
+      isVisible: () => document.visibilityState !== "hidden",
       onLoadError: (error) => callbacks.current.onLoadError(error),
       onAuthExpired: () => callbacks.current.onAuthExpired(),
     });

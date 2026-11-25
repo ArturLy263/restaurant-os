@@ -154,7 +154,10 @@ export interface Handover {
   handed_over_amount: Amount;
   received_amount: Amount;
   difference: Amount;
+  // Given with the count or afterwards (handover-explanation).
   reason: string | null;
+  // A non-zero difference still waiting for its explanation.
+  explanation_required: boolean;
   outgoing_user: UserRef;
   incoming_user: UserRef;
   self_confirmed: boolean;
@@ -167,7 +170,10 @@ export interface ShiftClosing {
   // null while the count is secret (blind handover still pending).
   counted_amount: Amount | null;
   difference: Amount | null;
+  // Given with the count or afterwards (closing-explanation).
   explanation: string | null;
+  // The recorded (final) count differs and is not explained yet.
+  explanation_required: boolean;
   user: UserRef;
   created_at: string;
 }
@@ -201,6 +207,8 @@ export interface PreviousClosing {
   closed_at: string;
   closed_by: UserRef;
   handover_pending: boolean;
+  // The closing's difference still waits for its explanation.
+  explanation_required: boolean;
 }
 
 // GET /cash/register (cash_shifts:view)
@@ -226,6 +234,20 @@ export interface CloseShiftRequest {
 export interface HandoverRequest {
   counted_amount: Amount;
   closing_explanation?: string | null;
+}
+
+// POST /cash/shifts/{id}/closing-explanation | handover-explanation
+export interface CountExplanationRequest {
+  explanation: string;
+}
+
+export interface CountExplanation {
+  id: string;
+  cash_shift_id: string;
+  kind: "CLOSING" | "HANDOVER" | (string & {});
+  explanation: string;
+  user_id: string;
+  created_at: string;
 }
 
 export interface OpeningCorrectionRequest {
@@ -416,4 +438,16 @@ export interface Refund {
   reason: string;
   user_id: string;
   created_at: string;
+}
+
+// error.details.orders of a 409 BUSINESS_DAY_HAS_OPEN_ORDERS from
+// POST /business-days/{id}/close (backend CashService.blocking_orders).
+export interface BlockingOrder {
+  order_id: string;
+  order_status: string;
+  table_number: number;
+  table_name: string | null;
+  bill_id: string | null;
+  bill_status: string | null;
+  outstanding_amount: Amount;
 }

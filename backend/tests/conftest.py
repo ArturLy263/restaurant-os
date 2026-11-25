@@ -59,7 +59,6 @@ REQUIRE_TEST_DATABASE = _require_test_database == "1"
 # Environment variables take precedence over .env in pydantic-settings.
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 os.environ["JWT_SECRET_KEY"] = "test-only-jwt-secret-key"
-os.environ["ADMIN_PASSWORD"] = "test-only-admin-password"
 
 
 import pytest  # noqa: E402

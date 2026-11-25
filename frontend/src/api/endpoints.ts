@@ -21,6 +21,11 @@ export function login(email: string, password: string): Promise<TokenResponse> {
   });
 }
 
+/** Revokes this access token on the server (sign-out). */
+export function logoutRequest(token: string): Promise<void> {
+  return apiRequest<void>(`${BASE}/auth/logout`, { method: "POST", token });
+}
+
 export function getMe(token: string, signal?: AbortSignal): Promise<CurrentUser> {
   return apiRequest<CurrentUser>(`${BASE}/me`, { token, signal });
 }
@@ -42,14 +47,20 @@ export function getStationQueue(
 
 export type PreparationAction = "start" | "ready" | "serve";
 
+/**
+ * Moves a preparation one step. With `idempotencyKey`, a repeated tap or a
+ * retry after a lost answer replays the first result (the routes accept an
+ * optional key).
+ */
 export function updatePreparation(
   token: string,
   preparationId: string,
   action: PreparationAction,
+  idempotencyKey?: string,
 ): Promise<PreparationResponse> {
   return apiRequest<PreparationResponse>(
     `${BASE}/preparations/${encodeURIComponent(preparationId)}/${action}`,
-    { method: "POST", token },
+    { method: "POST", token, ...(idempotencyKey ? { idempotencyKey } : {}) },
   );
 }
 

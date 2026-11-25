@@ -51,7 +51,7 @@ test database; "OpenAPI" is what `app.openapi()` publishes.
 
 Since Stage 2.1, `products.price` and `modifiers.price_adjustment` are
 exposed by `GET /api/v1/menu` as decimal strings (`Money`). The frontend
-(`frontend/src/pos/money.ts`) converts every amount, string or number, to
+(`frontend/src/lib/money.ts`) converts every amount, string or number, to
 integer cents before arithmetic.
 
 Other places that carry money:
@@ -62,7 +62,7 @@ Other places that carry money:
 | Outbox / WebSocket event contracts (`app/schemas/outbox.py`) | no money fields by design | n/a |
 | Stored idempotent responses (`idempotency_keys.response_body`) | copy of the response as it was serialized, replayed unchanged for 24 h | follows 1–9 |
 | Station queue (`GET /stations/{id}/preparations`) | no money fields | n/a |
-| Frontend (`frontend/src/api/types.ts`) | `Money = string \| number`; the POS converts to integer cents (`src/pos/money.ts`), never float arithmetic | ready for the switch |
+| Frontend (`frontend/src/api/types.ts`) | `Money = string \| number`; the POS converts to integer cents (`src/lib/money.ts`), never float arithmetic | ready for the switch |
 
 ## Inconsistencies
 

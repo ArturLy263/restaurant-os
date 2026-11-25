@@ -344,7 +344,10 @@ class CashShiftHandover(Base):
     next one, possibly from an earlier business day.
 
     `difference` (received - handed over) is the handover's own
-    discrepancy, explained by `reason`; it is not a cash movement and
+    discrepancy, explained by `reason` or, when the incoming cashier gave
+    none, later by a CashCountExplanation (kind HANDOVER) of the incoming
+    shift: the count is recorded whatever it is, so the response never
+    tells whether it matched (no oracle). It is not a cash movement and
     changes neither shift's expected cash. The record belongs to the
     incoming shift's business day.
     """
@@ -359,10 +362,6 @@ class CashShiftHandover(Base):
         CheckConstraint(
             "difference = received_amount - handed_over_amount",
             name="ck_cash_shift_handovers_difference",
-        ),
-        CheckConstraint(
-            "difference = 0 OR reason IS NOT NULL",
-            name="ck_cash_shift_handovers_reason",
         ),
         CheckConstraint(
             "from_shift_id <> to_shift_id",
@@ -623,7 +622,13 @@ class CashMovement(Base):
 
 class CashShiftClosing(Base):
     """The reconciliation recorded when a shift closes: what the ledger
-    expected, what was counted, and the breakdown at that moment."""
+    expected, what was counted, and the breakdown at that moment.
+
+    The count is recorded whatever it is (a blind count must not tell the
+    cashier whether it matched). A non-zero difference is explained here
+    or, when the cashier gave no explanation, later by a
+    CashCountExplanation (kind CLOSING); the business day cannot close
+    while a difference is unexplained."""
 
     __tablename__ = "cash_shift_closings"
     __table_args__ = (
@@ -634,10 +639,6 @@ class CashShiftClosing(Base):
         CheckConstraint(
             "difference = counted_amount - expected_amount",
             name="ck_cash_shift_closings_difference",
-        ),
-        CheckConstraint(
-            "difference = 0 OR explanation IS NOT NULL",
-            name="ck_cash_shift_closings_explained",
         ),
         _shift_fk("fk_cash_shift_closings_shift_restaurant"),
     )
@@ -695,3 +696,54 @@ class CashShiftClosing(Base):
     )
 
     user: Mapped["User"] = relationship()
+
+
+class CashCountExplanation(Base):
+    """The explanation of a counted difference, given after the count.
+
+    kind CLOSING: the difference of `cash_shift_id`'s closing.
+    kind HANDOVER: the difference of the handover into `cash_shift_id`.
+    Append-only, one per shift and kind, written only while the shift's
+    business day is open (triggers in migration b8d4e6f2a1c3).
+    """
+
+    __tablename__ = "cash_count_explanations"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('CLOSING', 'HANDOVER')",
+            name="ck_cash_count_explanations_kind",
+        ),
+        UniqueConstraint(
+            "cash_shift_id",
+            "kind",
+            name="uq_cash_count_explanations_shift_kind",
+        ),
+        _shift_fk("fk_cash_count_explanations_shift_restaurant"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    restaurant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("restaurants.id"),
+        nullable=False,
+    )
+
+    cash_shift_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    explanation: Mapped[str] = mapped_column(String(500), nullable=False)
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )

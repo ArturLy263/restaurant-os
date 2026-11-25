@@ -188,3 +188,33 @@ describe("KDS live updates", () => {
     expect(FakeWebSocket.instances).toHaveLength(2);
   });
 });
+
+describe("KDS fallback refresh", () => {
+  it("says it refreshes on its own until delivery is confirmed, then stops polling", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const pasta = queueItem({ product_name: "Pasta" });
+      const { socket, calls } = await openKitchen([pasta]);
+      await goLive(socket);
+      expect(liveStatus()).toContain("auto-refresh");
+      expect(liveStatus()).toContain("refreshes every 20 s");
+      const loads = () => calls.filter((call) => call.key === QUEUE).length;
+      await vi.waitFor(() => expect(loads()).toBe(2));
+
+      await act(async () => {
+        vi.advanceTimersByTime(20_000);
+      });
+      await vi.waitFor(() => expect(loads()).toBe(3));
+
+      act(() => socket.receive(statusChanged("e1", pasta, "PENDING", "IN_PROGRESS")));
+      expect(liveStatus()).toMatch(/^Live\./);
+      expect(liveStatus()).not.toContain("auto-refresh");
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(loads()).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

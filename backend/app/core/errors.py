@@ -38,6 +38,11 @@ class ErrorCode(StrEnum):
     # Authentication
     INVALID_CREDENTIALS = "INVALID_CREDENTIALS"
     USER_INACTIVE = "USER_INACTIVE"
+    # Too many failed sign-ins for this email or client address (429).
+    TOO_MANY_LOGIN_ATTEMPTS = "TOO_MANY_LOGIN_ATTEMPTS"
+
+    # A request body larger than max_request_body_bytes (413).
+    REQUEST_TOO_LARGE = "REQUEST_TOO_LARGE"
 
     # Authorization
     PERMISSION_DENIED = "PERMISSION_DENIED"
@@ -112,8 +117,13 @@ class ErrorCode(StrEnum):
     NO_OPEN_CASH_SHIFT = "NO_OPEN_CASH_SHIFT"
     CASH_SHIFT_ALREADY_OPEN = "CASH_SHIFT_ALREADY_OPEN"
     CASH_SHIFT_NOT_OPEN = "CASH_SHIFT_NOT_OPEN"
-    HANDOVER_REASON_REQUIRED = "HANDOVER_REASON_REQUIRED"
-    CLOSING_EXPLANATION_REQUIRED = "CLOSING_EXPLANATION_REQUIRED"
+    # The business day cannot close while a counted difference is unexplained.
+    CASH_DIFFERENCE_UNEXPLAINED = "CASH_DIFFERENCE_UNEXPLAINED"
+    # Explaining a count that has not been recorded, needs no explanation,
+    # or was already explained.
+    CASH_COUNT_NOT_RECORDED = "CASH_COUNT_NOT_RECORDED"
+    NO_DIFFERENCE_TO_EXPLAIN = "NO_DIFFERENCE_TO_EXPLAIN"
+    DIFFERENCE_ALREADY_EXPLAINED = "DIFFERENCE_ALREADY_EXPLAINED"
     OPENING_AMOUNT_UNCHANGED = "OPENING_AMOUNT_UNCHANGED"
     INSUFFICIENT_CASH = "INSUFFICIENT_CASH"
     # The incoming cashier must be another person than the outgoing one.

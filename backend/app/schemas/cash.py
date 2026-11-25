@@ -142,13 +142,16 @@ class OpenShiftRequest(BaseModel):
 
     # The cash the opening cashier counted in the drawer.
     opening_amount: MoneyInput
-    # Required when it differs from the previous shift's count.
+    # Why it differs from the previous shift's count, if the cashier knows.
+    # Optional: the count is recorded either way (no response tells whether
+    # it matched); an unexplained difference is explained afterwards.
     handover_reason: OptionalText = None
 
 
 class CloseShiftRequest(BaseModel):
     counted_amount: MoneyInput
-    # Required when the count differs from the expected cash.
+    # Optional, see OpenShiftRequest: an unexplained difference is
+    # explained afterwards (POST …/closing-explanation).
     explanation: OptionalText = None
 
 
@@ -163,6 +166,19 @@ class HandoverRequest(BaseModel):
 
     counted_amount: MoneyInput
     closing_explanation: OptionalText = None
+
+
+class CountExplanationRequest(BaseModel):
+    explanation: Reason
+
+
+class CountExplanationResponse(BaseModel):
+    id: uuid.UUID
+    cash_shift_id: uuid.UUID
+    kind: str
+    explanation: str
+    user_id: uuid.UUID
+    created_at: datetime
 
 
 class OpeningCorrectionRequest(BaseModel):
@@ -217,7 +233,10 @@ class HandoverResponse(BaseModel):
     handed_over_amount: Money
     received_amount: Money
     difference: Money
+    # Given with the count or afterwards (POST …/handover-explanation).
     reason: str | None
+    # A non-zero difference still waiting for its explanation.
+    explanation_required: bool
     # The employee who closed and counted the outgoing shift, and the one
     # who received and counted the cash.
     outgoing_user: UserRef
@@ -235,7 +254,11 @@ class ShiftClosingResponse(BaseModel):
     expected_amount: Money | None
     counted_amount: Money | None
     difference: Money | None
+    # Given with the count or afterwards (POST …/closing-explanation).
     explanation: str | None
+    # A non-zero difference still waiting for its explanation. Shown only
+    # once the count is recorded and final, so it cannot test a guess.
+    explanation_required: bool
     user: UserRef
     created_at: datetime
 
@@ -280,6 +303,8 @@ class PreviousClosingResponse(BaseModel):
     closed_by: UserRef
     # True until the next shift opens and confirms the cash received.
     handover_pending: bool
+    # The closing's difference still waits for its explanation.
+    explanation_required: bool
 
 
 class CashRegisterResponse(BaseModel):

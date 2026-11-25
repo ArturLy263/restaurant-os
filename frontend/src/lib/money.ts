@@ -56,3 +56,15 @@ export function formatAmount(value: Money | null | undefined, currency: string |
   const cents = toCents(value);
   return currency ? formatCents(cents, currency) : centsToDecimal(cents);
 }
+
+/**
+ * Integer cents from what someone typed into an amount field ("12",
+ * "12.5", "12,50"), or null when it is not a non-negative amount with at
+ * most two decimals and at most 8 whole digits (the backend's MoneyInput).
+ * Parsed from the digits, never through a float.
+ */
+export function parseAmountInput(text: string): number | null {
+  const match = /^(\d{1,8})(?:[.,](\d{1,2}))?$/.exec(text.trim());
+  if (!match) return null;
+  return Number(match[1]) * 100 + Number((match[2] ?? "").padEnd(2, "0"));
+}

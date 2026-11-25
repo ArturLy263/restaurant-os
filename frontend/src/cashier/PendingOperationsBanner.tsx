@@ -19,6 +19,8 @@ const TYPE_LABELS: Record<CashierOperationType, string> = {
   "cash_shift.close": "Close cash shift",
   "cash_shift.handover": "Hand over cash shift",
   "cash_shift.opening_correction": "Correct opening cash",
+  "cash_shift.closing_explanation": "Explain a closing count",
+  "cash_shift.handover_explanation": "Explain a handover count",
   "cash_movement.create": "Cash in / out",
   "bill.create": "Create bill",
   "bill.cancel_item": "Cancel billed item",
@@ -66,7 +68,11 @@ export function PendingOperationsBanner({ store, user, token }: PendingOperation
   const inDoubt = own.filter((op) => store.effectiveStatus(op) === "unknown").length;
 
   return (
-    <section className="cx-pending" aria-label="Unresolved operations">
+    <section
+      // Only confirmed history: shown quietly, not as a warning.
+      className={`cx-pending${own.length === 0 && others.length === 0 && warnings.length === 0 ? " cx-pending--quiet" : ""}`}
+      aria-label="Unresolved operations"
+    >
       {warnings.map((warning) => (
         <p key={warning} className="cx-pending__warning" role="alert">
           {warning}

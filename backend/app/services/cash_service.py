@@ -1,4 +1,4 @@
-"""Business days and the shared cash register (docs/stage-3-cashier-plan.md).
+"""Business days and the shared cash register (docs/archive/stage-3-cashier-plan.md).
 
 A business day is independent of cash shifts: shifts open, close and hand
 over the register within it while orders and payments go on. Every
@@ -19,6 +19,7 @@ from app.core.errors import ApiError, ErrorCode
 from app.core.states import BUSINESS_DAY, CASH_SHIFT
 from app.db.models.bill import Bill
 from app.db.models.cash import (
+    CashCountExplanation,
     BusinessDay,
     CashMovement,
     CashOpeningCorrection,
@@ -224,6 +225,15 @@ class CashService:
                 ErrorCode.CASH_SHIFT_STILL_OPEN,
                 "Close the open cash shift before closing the business day",
                 details={"cash_shift_ids": [str(i) for i in open_shifts]},
+            )
+
+        unexplained = CashService.unexplained_differences(db, day.id)
+        if unexplained:
+            raise _conflict(
+                ErrorCode.CASH_DIFFERENCE_UNEXPLAINED,
+                f"{len(unexplained)} counted cash difference(s) have no explanation; "
+                "explain each in the cash register before closing the business day",
+                details={"counts": unexplained},
             )
 
         blocking = CashService.blocking_orders(db, restaurant_id)
@@ -529,6 +539,136 @@ class CashService:
                 "The drawer should not hold that much cash",
             )
 
+    # --- Explaining a counted difference afterwards ---
+
+    @staticmethod
+    def unexplained_differences(db: Session, business_day_id: uuid.UUID) -> list[dict]:
+        """Closings and handovers of the day whose difference has no
+        explanation yet: {"cash_shift_id", "kind"}, no amounts."""
+
+        closings = db.scalars(
+            select(CashShiftClosing.cash_shift_id)
+            .join(CashShift, CashShift.id == CashShiftClosing.cash_shift_id)
+            .where(
+                CashShift.business_day_id == business_day_id,
+                CashShiftClosing.difference != ZERO,
+                CashShiftClosing.explanation.is_(None),
+                ~select(CashCountExplanation.id)
+                .where(
+                    CashCountExplanation.cash_shift_id == CashShiftClosing.cash_shift_id,
+                    CashCountExplanation.kind == "CLOSING",
+                )
+                .exists(),
+            )
+            .order_by(CashShiftClosing.created_at)
+        ).all()
+        handovers = db.scalars(
+            select(CashShiftHandover.to_shift_id)
+            .where(
+                CashShiftHandover.business_day_id == business_day_id,
+                CashShiftHandover.difference != ZERO,
+                CashShiftHandover.reason.is_(None),
+                ~select(CashCountExplanation.id)
+                .where(
+                    CashCountExplanation.cash_shift_id == CashShiftHandover.to_shift_id,
+                    CashCountExplanation.kind == "HANDOVER",
+                )
+                .exists(),
+            )
+            .order_by(CashShiftHandover.created_at)
+        ).all()
+        return [{"cash_shift_id": str(i), "kind": "CLOSING"} for i in closings] + [
+            {"cash_shift_id": str(i), "kind": "HANDOVER"} for i in handovers
+        ]
+
+    @staticmethod
+    def explain_closing(
+        db: Session,
+        restaurant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        shift_id: uuid.UUID,
+        explanation: str,
+        *,
+        may_explain_any: bool,
+    ) -> CashCountExplanation:
+        """Explains the counted difference of a closed shift: by the cashier
+        who counted it, or by management (`may_explain_any`)."""
+
+        shift = CashService.get_shift(db, restaurant_id, shift_id)
+        day = CashRepository(db).lock_business_day(shift.business_day_id, restaurant_id)
+        closing = db.scalar(select(CashShiftClosing).where(CashShiftClosing.cash_shift_id == shift.id))
+        if closing is None:
+            raise _conflict(ErrorCode.CASH_COUNT_NOT_RECORDED, "The shift has not been counted and closed yet")
+        if closing.user_id != user_id and not may_explain_any:
+            raise _forbidden("explain another employee's count")
+        return CashService._explain(
+            db, day, shift, "CLOSING", user_id, explanation,
+            difference=closing.difference, given=closing.explanation,
+        )
+
+    @staticmethod
+    def explain_handover(
+        db: Session,
+        restaurant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        shift_id: uuid.UUID,
+        explanation: str,
+        *,
+        may_explain_any: bool,
+    ) -> CashCountExplanation:
+        """Explains the difference of the handover into `shift_id`: by the
+        incoming cashier who counted it, or by management."""
+
+        shift = CashService.get_shift(db, restaurant_id, shift_id)
+        day = CashRepository(db).lock_business_day(shift.business_day_id, restaurant_id)
+        handover = db.scalar(select(CashShiftHandover).where(CashShiftHandover.to_shift_id == shift.id))
+        if handover is None:
+            raise _conflict(ErrorCode.CASH_COUNT_NOT_RECORDED, "No handover was counted into this shift")
+        if handover.incoming_user_id != user_id and not may_explain_any:
+            raise _forbidden("explain another employee's count")
+        return CashService._explain(
+            db, day, shift, "HANDOVER", user_id, explanation,
+            difference=handover.difference, given=handover.reason,
+        )
+
+    @staticmethod
+    def _explain(db, day, shift, kind, user_id, explanation, *, difference, given) -> CashCountExplanation:
+        # The count is already recorded and cannot change, so saying whether
+        # it needs an explanation reveals nothing a cashier could use.
+        if day is None or day.status != "OPEN":
+            raise _conflict(ErrorCode.BUSINESS_DAY_NOT_OPEN, "The business day is already closed")
+        if difference == ZERO:
+            raise _conflict(ErrorCode.NO_DIFFERENCE_TO_EXPLAIN, "This count needs no explanation")
+        already = given or db.scalar(
+            select(CashCountExplanation.id).where(
+                CashCountExplanation.cash_shift_id == shift.id,
+                CashCountExplanation.kind == kind,
+            )
+        )
+        if already:
+            raise _conflict(ErrorCode.DIFFERENCE_ALREADY_EXPLAINED, "This difference is already explained")
+        record = CashCountExplanation(
+            restaurant_id=shift.restaurant_id,
+            cash_shift_id=shift.id,
+            kind=kind,
+            explanation=explanation,
+            user_id=user_id,
+        )
+        db.add(record)
+        db.flush()
+        EventService.record(
+            db=db,
+            restaurant_id=shift.restaurant_id,
+            user_id=user_id,
+            event_type=f"cash_shift.{kind.lower()}_explained",
+            entity_type="cash_shift",
+            entity_id=shift.id,
+            metadata={"business_day_id": str(shift.business_day_id), "explanation": explanation},
+        )
+        commit(db)
+        db.refresh(record)
+        return record
+
     @staticmethod
     def get_shift(db: Session, restaurant_id: uuid.UUID, shift_id: uuid.UUID) -> CashShift:
         shift = CashRepository(db).get_shift(shift_id, restaurant_id)
@@ -592,13 +732,11 @@ class CashService:
             if previous_closing is not None
             else ZERO
         )
-        # Blind count: the amounts are never in the message.
-        if difference != ZERO and not handover_reason:
-            raise _required(
-                ErrorCode.HANDOVER_REASON_REQUIRED,
-                "The cash received differs from what the previous shift handed "
-                "over; recount, or give a reason",
-            )
+        # Blind count: the received amount is recorded whatever it is, and
+        # the response is the same either way, so a retry can never tell
+        # the cashier whether a guess matched what was handed over. A
+        # difference without a reason is explained afterwards
+        # (explain_handover); the day cannot close until it is.
 
         now = datetime.utcnow()
         shift = CashShift(
@@ -705,13 +843,11 @@ class CashService:
         report = cash_ledger.shift_report(db, shift)
         expected = Decimal(report["drawer"]["expected"])
         difference = counted_amount - expected
-        # Blind count: the expected cash is never in the message.
-        if difference != ZERO and not explanation:
-            raise _required(
-                ErrorCode.CLOSING_EXPLANATION_REQUIRED,
-                "The count differs from the expected cash; recount, or explain "
-                "the difference",
-            )
+        # Blind count: the count is recorded whatever it is and the shift
+        # closes, so it cannot be submitted again; no refusal depends on
+        # the expected cash (a refusal would tell the cashier whether a
+        # guess matched). A difference without an explanation is explained
+        # afterwards (explain_closing); the day cannot close until it is.
         now = datetime.utcnow()
         closing = CashShiftClosing(
             restaurant_id=shift.restaurant_id,

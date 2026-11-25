@@ -25,6 +25,8 @@ interface OrderPanelProps {
   onNotes(item: OrderItem, notes: string | null): void;
   onRemove(item: OrderItem): void;
   onSend(): void;
+  // Marks a READY dish as served; absent when the user may not serve.
+  onServe?(item: OrderItem): void;
 }
 
 export function OrderPanel(props: OrderPanelProps) {
@@ -88,7 +90,7 @@ export function OrderPanel(props: OrderPanelProps) {
                 ? "Sending…"
                 : `Send round · ${pending.length} ${pending.length === 1 ? "item" : "items"}`}
             </button>
-            {stations.length > 0 && <p className="send__to">To {describeDestinations(stations)}</p>}
+            {stations.length > 0 && <p className="send__to">Sends {describeDestinations(stations)}</p>}
           </div>
         )}
       </section>
@@ -102,7 +104,14 @@ export function OrderPanel(props: OrderPanelProps) {
         ) : (
           <ul className="lines">
             {sent.map((item) => (
-              <SentLine key={item.id} item={item} products={products} currency={currency} />
+              <SentLine
+                key={item.id}
+                item={item}
+                products={products}
+                currency={currency}
+                busy={props.busyItemIds.has(item.id)}
+                onServe={props.onServe}
+              />
             ))}
           </ul>
         )}
@@ -211,13 +220,18 @@ function SentLine({
   item,
   products,
   currency,
+  busy,
+  onServe,
 }: {
   item: OrderItem;
   products: Map<string, MenuProduct>;
   currency: string;
+  busy: boolean;
+  onServe?(item: OrderItem): void;
 }) {
   const name = itemName(item, products);
   const status = item.status === "CANCELLED" ? "CANCELLED" : (item.preparation?.status ?? "PENDING");
+  const servable = Boolean(onServe) && item.status !== "CANCELLED" && item.preparation?.status === "READY";
 
   return (
     <li className={`line line--sent${item.status === "CANCELLED" ? " line--cancelled" : ""}`}>
@@ -230,6 +244,19 @@ function SentLine({
       </div>
       <span className="line__price">{formatMoney(item.total_price, currency)}</span>
       <span className={`prep prep--${status.toLowerCase()}`}>{PREPARATION_LABELS[status]}</span>
+      {servable && (
+        <div className="line__controls">
+          <button
+            type="button"
+            className="button button--action button--serve button--small"
+            disabled={busy}
+            aria-label={`Mark served: ${item.quantity}× ${name}`}
+            onClick={() => onServe!(item)}
+          >
+            {busy ? "Serving…" : "Served"}
+          </button>
+        </div>
+      )}
     </li>
   );
 }

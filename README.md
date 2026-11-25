@@ -2,171 +2,428 @@
 
 [![CI](https://github.com/ArturLy263/restaurant-os/actions/workflows/ci.yml/badge.svg)](https://github.com/ArturLy263/restaurant-os/actions/workflows/ci.yml)
 
-Backend for restaurant order, kitchen and billing workflows, plus a waiter POS and a kitchen display (KDS) frontend,
-designed from my experience working in restaurant kitchens. It is a portfolio project, not a
-production system.
+A restaurant point-of-sale system covering one complete shift of service:
+**waiter POS → kitchen and bar displays → cashier → payment → shift
+handover → manager report.** Built with FastAPI, PostgreSQL and React, and
+designed from my experience working in restaurant kitchens.
 
-## What it does today
+It is a portfolio project, not a production system. What it shows is the
+engineering behind a credible POS: data that stays correct under
+concurrency and retries, money handled exactly, cash that is accounted for
+by people who cannot see what the drawer should hold, and kitchen displays
+that never silently freeze.
 
-- **Orders → kitchen → bill → payment** through a versioned REST API (FastAPI, `/api/v1`), with
-  preparation states `PENDING → IN_PROGRESS → READY → SERVED`.
-- **PostgreSQL data model** managed with SQLAlchemy 2 and Alembic migrations; migration tests check
-  upgrade/downgrade round-trips and that models match the migrated schema.
-- **Data integrity under concurrency:** writes lock the order row (`SELECT … FOR UPDATE`);
-  concurrency tests coordinate real connections through PostgreSQL's lock graph.
-- **Idempotency keys** for payments and other mutations, committed in the same transaction as the
-  business change.
-- **Role-based permissions** (waiter, kitchen, bar, cashier, manager) and per-station access.
-- **Audit trail:** order, kitchen and billing actions are recorded in `operational_events` with the acting user.
-- **Transactional outbox:** domain events are written in the same transaction as the change; a
-  delivery worker claims them with `FOR UPDATE SKIP LOCKED`, retries with backoff, dead-letters after
-  repeated failures and keeps each order's events in order. Event payloads are versioned contracts.
-- **Station event streams:** authenticated, station-scoped WebSockets that push outbox events to
-  kitchen and bar displays.
-- **Tenant consistency:** database triggers keep each restaurant's records apart; central status
-  rules backed by CHECK constraints.
-- **Waiter POS** ([`frontend/`](frontend/README.md)): tables with their open orders, menu with
-  availability and modifiers, an order builder (quantities, notes, removing unsent items) and rounds
-  sent to the right kitchen or bar station, idempotently.
-- **Kitchen display** ([`frontend/`](frontend/README.md), React + TypeScript + Vite): sign-in, station
-  queue, start / ready / serve, live updates with reconnect; unit and component tests (Vitest) and a
-  headless-Chrome test against a mock API.
-- **CI** (GitHub Actions): backend unit, integration and migration suites against a PostgreSQL 16
-  service; frontend type check, tests and production build.
+![Manager report of a closed business day](docs/screenshots/13-manager-report.png)
 
-Not built yet: APIs for menu, table, user and role management (menu and tables are read-only);
-cashier and manager screens; printers; inventory; analytics; deployment.
+## What it does
+
+- **Waiter POS:** tables with their open orders. An order builder with the
+  menu, modifier rules (required, at most N), quantities and notes. Rounds
+  are sent to the right station (food to the Kitchen, drinks to the Bar),
+  and preparation progress shows on each line. Ready dishes are marked
+  *Served* from the POS.
+- **Kitchen and bar displays (KDS):** each station sees only its own queue
+  (*New → Preparing → Ready*), with Start / Ready / Serve, live updates over
+  an authenticated WebSocket, reconnect with backoff, and a 20 s fallback
+  refresh while live delivery is not confirmed.
+- **Cashier workspace:**
+  - Orders waiting to be paid, with what is due, and bill creation.
+  - Cash payments (change worked out on screen) and card payments the
+    cashier confirms from the external terminal, with tips and partial
+    payments.
+  - Equal splits computed by the server to the cent.
+- **Cash register:**
+  - Opening the business day and shifts, and cash in / out with a reason.
+  - A **blind count** at closing: the cashier never sees the expected cash.
+  - A **two-person handover**: the next cashier counts and confirms it.
+- **Manager reports:**
+  - Revenue, tips and refunds by payment method.
+  - Every shift's drawer, count and difference, and the handovers.
+  - Closing the business day, which freezes its report. If something is
+    still open, the screen lists it.
+- **Role-based access:** admin, manager, cashier, waiter, kitchen and bar.
+  The UI offers only what `/me` allows, and the API checks every request.
+
+Not built: menu, table, user and role management screens or APIs (the menu
+and tables come from the demo seed); refund, bill-adjustment and void
+screens (the API supports them); printers; inventory; external payment
+providers; deployment. See [Known limitations](#known-limitations).
+
+## Technology
+
+| Layer | Stack |
+| --- | --- |
+| Backend | Python 3.14, FastAPI, SQLAlchemy 2, Alembic, Pydantic 2, bcrypt + JWT |
+| Database | PostgreSQL 16 (Docker), CHECK constraints and triggers for invariants |
+| Real-time | Transactional outbox → in-process delivery → station WebSockets |
+| Frontend | React 19, TypeScript 6, Vite 8; no UI or state libraries |
+| Tests | pytest (unit, integration against PostgreSQL, migrations), Vitest + Testing Library, headless Chrome over the DevTools protocol |
+| CI | GitHub Actions: backend suites against a PostgreSQL 16 service, frontend type check, tests and build |
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    Client -->|HTTP + JWT| API[FastAPI routes]
-    API --> Perm[Permission and station checks]
-    Perm --> Svc[Services]
-    Svc --> UoW[Unit of work / repositories]
-    UoW --> PG[(PostgreSQL 16)]
-    Svc --> Ev[operational_events audit log]
-    Ev --> PG
-    Svc --> OB[outbox_events]
-    OB --> PG
-    PG -.claimed by.-> W[Outbox worker]
-    W --> WS[Station WebSocket streams]
-    WS --> KDS[Kitchen display<br/>React frontend]
-    KDS -->|HTTP + JWT| API
+    POS[Waiter POS] -->|HTTP + JWT| API
+    CX[Cashier workspace] -->|HTTP + JWT + Idempotency-Key| API
+    KDS[Kitchen / Bar display] -->|HTTP + JWT| API
+    API[FastAPI routes<br/>permissions, idempotency] --> SVC[Services<br/>row locks, business rules]
+    SVC -->|one transaction:<br/>change + audit + outbox + key| PG[(PostgreSQL 16)]
+    PG -.->|FOR UPDATE SKIP LOCKED| DEL[Outbox delivery]
+    DEL --> HUB[Station event hub]
+    HUB -->|WebSocket| KDS
 ```
 
-## Quick start
+More in [`docs/architecture.md`](docs/architecture.md): the system
+overview, the order-to-payment sequence, the outbox, the tenant isolation
+model, and the cash ledger with the blind count.
 
-```bash
-cp .env.example .env              # then edit the values
-docker compose up -d postgres
-python3.14 -m venv .venv && source .venv/bin/activate
-pip install -r backend/requirements-test.txt -c backend/constraints.txt
-alembic upgrade head
-python backend/seed.py            # once, on an empty database
-uvicorn app.main:app --app-dir backend --reload   # docs at http://127.0.0.1:8000/docs
-pytest -m unit                    # no database needed
-```
+### Key engineering decisions
 
-## Project layout
+Recorded as ADRs in [`docs/adr/`](docs/adr/):
 
-```text
-alembic.ini                 Alembic configuration (run alembic from the repo root)
-docker-compose.yml          PostgreSQL 16 for local development (port 5433)
-pytest.ini                  pytest configuration and test markers
-backend/app/                FastAPI application (entry point: app.main:app)
-backend/app/realtime/       station event streams (WebSocket hub, fan-out)
-backend/alembic/            database migrations
-backend/requirements.txt    pinned runtime dependencies
-backend/requirements-test.txt  pinned test dependencies (includes runtime)
-backend/constraints.txt     exact versions of all transitive dependencies
-backend/seed.py             demo data for an empty database (run once)
-backend/tests/              test suite
-backend/app/workers/        outbox delivery worker
-frontend/                   kitchen display (React + TypeScript), see frontend/README.md
-scripts/                    maintenance scripts
-.github/workflows/ci.yml    CI: backend unit, integration and migration tests; frontend checks
-```
+1. **[Transactional outbox](docs/adr/0001-transactional-outbox-and-websocket-delivery.md):**
+   domain events are written in the same transaction as the change. Delivery
+   is at-least-once and ordered per order, and the displays reload and
+   deduplicate.
+2. **[Idempotency keys](docs/adr/0002-idempotency-keys.md):** the key and
+   the stored response are committed with the change. Money operations
+   require a key, and the cashier UI stores every operation before sending
+   it, so a lost answer is retried, never repeated.
+3. **[Tenant isolation](docs/adr/0003-tenant-isolation.md):** the
+   restaurant always comes from the signed-in user. Other restaurants'
+   records look missing, and database triggers refuse cross-restaurant
+   links.
+4. **[Money](docs/adr/0004-monetary-representation.md):** `Decimal` /
+   `Numeric(10,2)` on the server, decimal strings on the wire, integer
+   cents in the browser.
+5. **[Blind count and two-person handover](docs/adr/0005-blind-count-and-two-person-handover.md):**
+   expected cash is visible to managers only. Ledger rows are append-only
+   and can only be written into an open shift.
 
-## Development setup
+Concurrency is handled with row locks (`SELECT … FOR UPDATE` on the order,
+the table, the shift and the business day). The tests coordinate real
+PostgreSQL connections through the lock graph instead of using timers.
 
-Requirements: Python 3.14 and Docker. All commands run from the
-repository root.
+## Demo accounts
 
-1. Create a virtual environment and install the dependencies:
+`backend/seed_demo.py` creates "RestaurantOS Demo Bistro": 8 tables, a
+Kitchen and a Bar station, and 16 products in 4 categories with modifier
+groups. One product is inactive, to show an unavailable item. It also
+creates these accounts. **Every account signs in with the password you set
+as `DEMO_PASSWORD`.** It is never printed or stored in plain text.
 
-   ```bash
-   python3.14 -m venv .venv
-   source .venv/bin/activate
-   pip install -r backend/requirements-test.txt -c backend/constraints.txt
-   pip check
-   ```
+| Email | Role | Sees after sign-in |
+| --- | --- | --- |
+| `waiter@demo.restaurantos.example` | `WAITER` | Waiter POS (serves dishes from every station) |
+| `kitchen@demo.restaurantos.example` | `KITCHEN` | Kitchen display |
+| `bar@demo.restaurantos.example` | `BAR` | Bar display |
+| `cashier1@demo.restaurantos.example` | `CASHIER` | Cashier workspace (blind count) |
+| `cashier2@demo.restaurantos.example` | `CASHIER` | Cashier workspace, for the two-person handover |
+| `manager@demo.restaurantos.example` | `MANAGER` | All three, switched in the top bar; reports and closing the day |
+| `admin@demo.restaurantos.example` | `ADMIN` | Everything |
 
-   To run the API only, `backend/requirements.txt` is enough. The
-   constraints file pins every transitive dependency to the versions the
-   project is tested with.
+The domain `demo.restaurantos.example` is reserved for examples
+([RFC 2606](https://www.rfc-editor.org/rfc/rfc2606)) and can never belong
+to a real mailbox. Never reuse `DEMO_PASSWORD` anywhere else.
 
-2. Configure the environment and adjust the values:
+## Run the demo locally
+
+Requirements: Docker, Python 3.14, Node 20.19+ (or 22.12+). Run every
+command from the repository root unless noted.
+
+1. **Configure.** Copy the example and edit three values in `.env`:
 
    ```bash
    cp .env.example .env
    ```
 
-   | Variable | Used for |
+   | Variable | Set it to |
    | --- | --- |
-   | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | the Docker PostgreSQL container |
-   | `DATABASE_URL` | the API, Alembic and seed script (development database) |
-   | `JWT_SECRET_KEY` | signing access tokens; use a long random value |
-   | `ADMIN_PASSWORD` | password of the demo admin created by `seed.py` |
-   | `TEST_DATABASE_URL` | optional, see [Tests](#tests) |
+   | `POSTGRES_PASSWORD` and the password inside `DATABASE_URL` | the same new password of your choice |
+   | `JWT_SECRET_KEY` | a long random value, e.g. the output of `python3 -c "import secrets; print(secrets.token_urlsafe(48))"` |
+   | `DEMO_PASSWORD` | the password for every demo account (8+ characters, at most 72 bytes) |
 
-   Environment variables take precedence over `.env`.
-   `REQUIRE_TEST_DATABASE` (see [Tests](#tests)) is read from the
-   environment only.
+   `DATABASE_URL` already points at a database named `restaurant_os_demo`
+   on `localhost:5433`. The demo seed refuses any database whose name does
+   not end in `_demo` or `_dev`.
 
-3. Start PostgreSQL:
+2. **Start PostgreSQL and install the backend:**
 
    ```bash
    docker compose up -d postgres
+   python3.14 -m venv .venv && source .venv/bin/activate
+   pip install -r backend/requirements-test.txt -c backend/constraints.txt
    ```
 
-4. Apply the migrations to the development database:
+3. **Create the schema and the demo data:**
 
    ```bash
    alembic upgrade head
-   alembic current
+   python backend/seed_demo.py --dry-run   # every check, then roll back
+   python backend/seed_demo.py             # safe to run again
    ```
 
-5. Load the demo data (restaurant, admin user, menu, tables, kitchen
-   station, modifiers):
+4. **Start the API** with live kitchen and bar updates:
 
    ```bash
-   python backend/seed.py
+   OUTBOX_WEBSOCKET_DELIVERY=true uvicorn app.main:app --app-dir backend --reload
    ```
 
-   > **Warning:** `seed.py` is not safe to run repeatedly. Run it
-   > **once**, on a freshly migrated, empty database. It always inserts a
-   > new demo restaurant and never checks for or updates existing data:
-   > on an already seeded database it aborts with a duplicate-key error
-   > for `admin@restaurantos.com` (and rolls back), and on a database
-   > with other data but no demo admin it adds another demo restaurant
-   > next to it. To start over, use a fresh database.
-   > (`backend/seed_modifiers.py` only adds the burger modifiers to
-   > databases seeded before `seed.py` included them.)
+   Check it with `curl http://127.0.0.1:8000/health`; outside production the API docs are at
+   <http://127.0.0.1:8000/docs>. Without the flag everything still works,
+   but the displays reload every 20 s instead of updating live.
 
-6. Start the API:
+5. **Start the frontend** in a second terminal:
 
    ```bash
-   uvicorn app.main:app --app-dir backend --reload
+   cd frontend
+   npm install
+   npm run dev      # http://localhost:5173 (proxies /api to port 8000)
    ```
 
-   Check it with `curl http://127.0.0.1:8000/health`; the interactive API
-   docs are at <http://127.0.0.1:8000/docs>. Log in as
-   `admin@restaurantos.com` with `ADMIN_PASSWORD`.
+6. Open <http://localhost:5173> in one browser window per person (or
+   private windows: each tab keeps its own sign-in) and follow the
+   walkthrough.
 
-   The API delivers outbox events to station displays only with
-   `OUTBOX_WEBSOCKET_DELIVERY=true` (see
-   [Station event streams](#station-event-streams)); otherwise events
-   stay in the outbox until a worker delivers them.
+## Demo walkthrough
+
+The whole flow takes about ten minutes. The screenshots come from
+`npm run screenshots`, which drives exactly these steps in the real
+application on a disposable database (see [Screenshots](#screenshots)).
+Amounts assume the seeded menu.
+
+![Sign-in](docs/screenshots/01-login.png)
+
+**1. Cashier opens the day.** Sign in as `cashier1`. Choose
+**Cash Register** → **Open business day**, enter `150` as *Opening cash*
+→ **Open shift**. Payments are refused until a day and a shift are open.
+
+![Cash register with the day and the shift open](docs/screenshots/06-cashier-register.png)
+
+**2. Kitchen and bar.** In two more windows, sign in as `kitchen` and
+`bar`. Each display opens its own station; the status shows *Live* once
+events arrive.
+
+**3. Waiter takes table 3.** Sign in as `waiter`, tap **Table 3**, keep or
+change the number of guests → **Open order**.
+
+![Waiter POS tables](docs/screenshots/02-waiter-tables.png)
+
+- **Mains** → **Classic burger**. *Doneness* is required, so choose
+  **Medium**, add **Cheese** (+€1.00) → **Add · €14.50**.
+- **Pizza Margherita** → **Add · €11.00**.
+- **Drinks** → **Coca-Cola**, then **+** on its line for 2.
+- **Send round · 3 items** sends the round: 2 items to the Kitchen, 1 to
+  the Bar.
+
+![Choosing modifiers](docs/screenshots/03-order-modifiers.png)
+![The round before sending](docs/screenshots/04-waiter-order.png)
+
+**4. Stations prepare.** The burger and pizza appear on the Kitchen display
+with their modifiers, and the Coca-Colas on the Bar display. Tap
+**Start**, then **Ready** on each.
+
+![Kitchen display](docs/screenshots/05-kitchen-kds.png)
+![Bar display](docs/screenshots/05-bar-kds.png)
+
+**5. Waiter serves.** In the waiter's open order, each dish turns *Ready*
+and gets a **Served** button. The order refreshes every 15 s, or go back
+to **Tables** and reopen it.
+
+![Serving ready dishes](docs/screenshots/07-waiter-serve.png)
+
+**6. Cashier bills and splits.** As `cashier1`, open **Orders**. Table 3
+shows €31.10 due → **Create bill** opens it in **Payments**.
+
+- **Split in 2** shows two shares of €15.55, and Share 1 is selected.
+  Enter `20` as *Cash received* to see the change (€4.45), then
+  **Record cash payment**.
+- Share 2 is selected next. Choose **Card**, tick *The card terminal
+  approved €15.55*, and optionally enter a receipt number →
+  **Record card payment**.
+- The bill shows **Paid in full**: the order is closed and table 3 is free
+  again in the POS.
+
+![Orders to pay](docs/screenshots/08-cashier-orders.png)
+![Equal split, cash share with change](docs/screenshots/09-payment-split-cash.png)
+![Bill paid in full](docs/screenshots/10-payment-paid.png)
+
+**7. Cash out and blind handover.** In **Cash Register**, choose
+**Cash out**, enter `20` and a reason → **Record cash out**. Under
+*Count and close the shift*, keep **Hand over**. Count `145.55` (150
+opening + 15.55 cash − 20) → **Hand over shift** → **Confirm handover**.
+The cashier never sees the expected amount.
+
+![Blind count before handing over](docs/screenshots/11-shift-handover.png)
+
+**8. Second cashier receives the cash.** Sign in as `cashier2` →
+**Cash Register**. *Receive the cash and open a shift*: count `145.55` →
+**Open shift**. The handover from Demo Cashier One is recorded. (`cashier1`
+cannot do this step: the same person may not confirm their own handover.)
+
+**9. Closing short.** As `cashier2`, choose **Close the register**, count
+`140` → **Close shift** → **Confirm close**. The count is recorded as
+entered: a blind count is never refused or re-asked, so no answer can tell
+a cashier whether a guess matched the expected cash. Because this recorded
+count differs, *Explain the closing count* appears, without any amount.
+Enter `Coins miscounted` → **Record explanation**. The business day cannot
+close until every difference is explained.
+
+![Second shift closed, its difference being explained](docs/screenshots/12-shift-closed.png)
+
+**10. Manager closes the day.** Sign in as `manager`, switch to **Cashier**
+in the top bar → **Reports** → **Close business day** →
+**Confirm close day**. The frozen report shows:
+
+- revenue €31.10 (€15.55 cash, €15.55 card) and tips;
+- both shifts with opening cash, cash sales, cash out, expected, counted
+  and the −€5.55 difference with its explanation;
+- the handover between the two cashiers.
+
+If an order or a shift were still open, or a counted difference
+unexplained, closing would be refused and the screen would list what
+blocks it (with a form to explain each difference).
+
+The same workflow runs as an automated test against the API
+(`backend/tests/integration/test_demo_workflow.py`). Doing it by hand
+writes to your demo database and closes its business day; the next day,
+open a new one.
+
+## Known limitations
+
+- **Scope:** there are no screens or APIs to manage the menu, tables,
+  users or roles; the demo seed provides them. Refunds, bill adjustments,
+  voids and opening-cash corrections exist in the API but have no screens.
+  There are no printers, inventory, external payment providers or
+  deployment setup.
+- **Real-time:** live KDS delivery runs inside one API process (an
+  in-memory hub), so it needs exactly one process with
+  `OUTBOX_WEBSOCKET_DELIVERY=true`. The stream has no heartbeat, so an idle
+  station is refreshed every 20 s until its first event.
+- **Polling:** the POS tables (20 s), an open order (15 s), the cashier
+  orders (20 s) and the register (15 s) refresh by polling.
+- **Business date:** the cashier opens today's business day. Backdating
+  (managers) is in the API only.
+- **Money format:** order item and modifier prices are still JSON numbers
+  in some responses; see [`docs/monetary-contract.md`](docs/monetary-contract.md).
+- **Security:** see [Security](#security). The demo runs over plain HTTP;
+  production needs the deployment steps in
+  [`docs/security.md`](docs/security.md), which are not automated here.
+
+## Security
+
+Implemented and tested (details, design and remaining risks in
+[`docs/security.md`](docs/security.md)):
+
+- **Sign-in:** bcrypt; throttling per email and per client address, stored
+  in PostgreSQL (shared by every process), with doubling, self-expiring
+  blocks; the same answer and the same bcrypt work for unknown emails,
+  wrong passwords and inactive accounts.
+- **Sessions:** short-lived JWTs that carry a token version and id. Sign-out
+  revokes the token; any password change ends every earlier session (a
+  database trigger bumps the version); deactivation blocks at once.
+- **Configuration:** the API refuses to start with an empty, placeholder or
+  weak JWT secret, and in production with a weak database password or
+  wildcard CORS. Errors never print configuration values.
+- **Blind count without an oracle:** counts are recorded as entered; a
+  difference is explained afterwards and the day cannot close until it is.
+- **HTTP:** security headers and a strict CSP on API responses, HSTS when
+  configured, request size limit, opt-in CORS, API docs off in production;
+  the frontend build is served with a hash-based CSP (`npm run e2e:csp`
+  verifies it in Chrome). Validation errors never echo submitted values;
+  database errors are logged without their parameters.
+- **Data:** tenant isolation from the signed-in user, backed by database
+  triggers; append-only cash ledger; idempotent money operations.
+
+## Tests and CI
+
+```bash
+# Backend (repo root; integration tests use <DATABASE_URL name>_test, created and migrated automatically)
+REQUIRE_TEST_DATABASE=1 pytest          # unit + integration + migration suites
+pytest -m unit                          # no database needed
+
+# Frontend
+cd frontend
+npm run typecheck && npm test && npm run build
+npm run e2e        # optional: KDS in headless Chrome against a mock API
+npm run e2e:pos    # optional: POS + displays against a real API on a disposable database
+```
+
+Tests never touch the development or demo database: the test database name
+must end in `_test`, and migration and browser runs create and drop their
+own randomly named databases. CI runs the backend suites against a
+PostgreSQL 16 service with `REQUIRE_TEST_DATABASE=1`, plus the frontend
+type check, tests and build. Details: [Tests](#tests),
+[Continuous integration](#continuous-integration).
+
+## Project layout
+
+```text
+backend/app/                FastAPI application (entry point: app.main:app)
+  api/routes/               HTTP and WebSocket routes (/api/v1)
+  services/                 business rules: orders, bills, cash, ledger, cashier views
+  realtime/                 station event hub, streams and in-process delivery
+  workers/                  outbox delivery worker (standalone runner)
+  db/models/                SQLAlchemy models
+backend/alembic/            database migrations
+backend/seed_demo.py        demo restaurant and accounts (idempotent; *_dev/*_demo databases only)
+backend/tests/              unit, integration and migration tests
+frontend/src/               React app: pos/, kds/, cashier/, api/, auth/, lib/
+frontend/e2e/               headless-Chrome tests and the screenshot runner
+docs/                       architecture, ADRs, monetary contract, screenshots
+scripts/                    disposable databases for the browser runs; maintenance
+docker-compose.yml          PostgreSQL 16 for local development (port 5433)
+.github/workflows/ci.yml    CI
+```
+
+## Development setup
+
+The steps in [Run the demo locally](#run-the-demo-locally) set up a full
+development environment. More detail:
+
+- **Dependencies:** `backend/requirements.txt` is enough for the API alone.
+  `backend/constraints.txt` pins every transitive dependency to the tested
+  versions; run `pip check` after installing.
+- **Configuration:** environment variables take precedence over `.env`.
+
+  | Variable | Used for |
+  | --- | --- |
+  | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | the Docker PostgreSQL container |
+  | `DATABASE_URL` | the API, Alembic and the demo seed |
+  | `JWT_SECRET_KEY` | signing access tokens |
+  | `DEMO_PASSWORD` | password of every demo account created by `seed_demo.py` |
+  | `TEST_DATABASE_URL` | optional, see [Tests](#tests) |
+  | `OUTBOX_WEBSOCKET_DELIVERY` | `true` to push station events to the displays (one API process) |
+  | `ENVIRONMENT` | `development` (default), `test` or `production` (strict checks, API docs off) |
+  | `LOGIN_*`, `HSTS_MAX_AGE_SECONDS`, `MAX_REQUEST_BODY_BYTES`, `CORS_ALLOWED_ORIGINS`, `API_DOCS_ENABLED` | optional hardening; see `.env.example` and [`docs/security.md`](docs/security.md) |
+
+  The API refuses to start with a placeholder, short or repetitive
+  `JWT_SECRET_KEY`; generate one with
+  `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+
+- **Demo seed safety:** `seed_demo.py` creates only what is missing and
+  never updates or deletes anything. Existing rows that differ are
+  reported, and passwords are never changed. Before writing, it refuses
+  unless all of these hold:
+  - the configured database name ends in `_dev` or `_demo` (`*_test` is
+    always refused);
+  - `current_database()` really is that database;
+  - the code has a single Alembic head and the database is at it;
+  - `DEMO_PASSWORD` is 8+ characters, at most 72 bytes, and not a
+    placeholder.
+
+  A conflict aborts with nothing written (exit 3), a refusal exits 2, any
+  other error exits 1 and is reported by its type only, and Ctrl+C
+  exits 130.
+
+---
+
+# Reference
+
+The API contracts in detail: errors, money values, roles and permissions,
+idempotency, concurrency, status rules, tenant consistency, the outbox and
+the station event streams.
 
 ## API conventions
 
@@ -233,8 +490,9 @@ Field-by-field inventory and the transition plan:
 
 ### Roles and permissions
 
-Every endpoint except `POST /api/v1/auth/login`, `GET /health` and
-`GET /api/v1/me` requires a permission, checked on the backend for each
+Every endpoint except `POST /api/v1/auth/login`, `GET /health`,
+`GET /api/v1/me` and `POST /api/v1/auth/logout` (the last two need only a
+valid token) requires a permission, checked on the backend for each
 request. A user's permissions come from their role: the `roles` row of
 their restaurant whose `name` is one of the codes below (exact, upper
 case). The role is read from the database on every request, so changing a
@@ -261,8 +519,8 @@ user's role takes effect without a new token.
 | `events:view` | `GET /events` | | | | | ✓ |
 | `menu:manage`, `tables:manage` | none yet | | | | | ✓ |
 
-(Paths are under `/api/v1`.) `ADMIN` is the administrator role created by
-`seed.py`; it has every permission, like `MANAGER`. The policy lives in
+(Paths are under `/api/v1`.) `ADMIN` is the administrator role (the demo
+admin's role); it has every permission, like `MANAGER`. The policy lives in
 `backend/app/core/permissions.py`.
 
 - A missing permission is 403 `PERMISSION_DENIED`
@@ -294,8 +552,10 @@ user's role takes effect without a new token.
 - Kitchen and bar users work only the stations assigned to them (see
   [Station scope](#station-scope)).
 
-There is no API to manage roles or users yet; `seed.py` creates only the
-`ADMIN` role. Other roles are `roles` rows with the codes above.
+There is no API to manage roles or users yet; `backend/seed_demo.py`
+creates every role above with one or two demo accounts each (see
+[Demo accounts](#demo-accounts)). Roles are `roles` rows with the codes
+above.
 
 #### Station scope
 
@@ -519,6 +779,7 @@ Stage 3.1) a request without one is refused with 428
 | Close a shift, or hand it over (step 1) — **required** | `POST /api/v1/cash/shifts/{shift_id}/close\|handover` |
 | Cash in or out — **required** | `POST /api/v1/cash/shifts/{shift_id}/movements` |
 | Correct a shift's opening amount — **required** | `POST /api/v1/cash/shifts/{shift_id}/opening-corrections` |
+| Explain a recorded count's difference — **required** | `POST /api/v1/cash/shifts/{shift_id}/closing-explanation\|handover-explanation` |
 | Open or close a business day | `POST /api/v1/business-days`, `POST /api/v1/business-days/{id}/close` |
 | Start, finish or serve a preparation | `POST /api/v1/preparations/{preparation_id}/start\|ready\|serve` |
 | Discard a paid order's preparation | `POST /api/v1/preparations/{preparation_id}/discard` |
@@ -1041,6 +1302,38 @@ pytest -m integration     # uses the PostgreSQL test database
 pytest -m migrations      # migration round-trips on a disposable database
 ```
 
+`backend/tests/integration/test_demo_workflow.py` plays the whole portfolio
+demo through the HTTP API with the seeded demo accounts (seeded into the
+test's rolled-back session): waiter order with modifiers, Kitchen and Bar
+queues, serving, bill, equal split paid in cash and by confirmed card,
+cash out, blind count, two-person handover, a second shift with a
+difference, and the manager closing the day with its frozen report.
+
+Frontend checks (in `frontend/`): `npm run typecheck`, `npm test`
+(Vitest) and `npm run build`. Two browser runs use headless Chrome and are
+run locally, not in CI: `npm run e2e` drives the kitchen display against a
+mock API, and `npm run e2e:pos` drives the POS and both displays against a
+real API on a disposable database (see [`frontend/README.md`](frontend/README.md)).
+
+### Screenshots
+
+`docs/screenshots/` is produced by `cd frontend && npm run screenshots`
+(`frontend/e2e/screenshots.mjs`). It does the following:
+
+1. Creates a disposable PostgreSQL database
+   (`restaurantos_disposable_<random>_test`, via
+   `scripts/demo_screenshots/database.py` and the same guard as the
+   migration tests).
+2. Migrates it and loads the demo seed.
+3. Starts the API with live delivery and the Vite dev server.
+4. Signs in with the demo accounts in separate headless Chrome windows and
+   performs the [demo walkthrough](#demo-walkthrough) through the UI.
+
+Every step waits for what the screen must show, and the run fails on any
+browser console error. The database is dropped at the end; no other
+database is written. It needs Docker's PostgreSQL, the backend virtualenv
+and Chrome.
+
 Every test is marked automatically from the fixtures it uses: tests that
 use the test database are `integration`, tests that use a disposable
 migration database are `migrations`, all others are `unit`. Markers are
@@ -1051,7 +1344,7 @@ strict, so a misspelled marker fails collection.
 Tests never touch the development database.
 
 - **Integration tests** use a separate database named after
-  `DATABASE_URL` with `_test` appended (e.g. `restaurant_os_test`), or
+  `DATABASE_URL` with `_test` appended (e.g. `restaurant_os_demo_test`), or
   `TEST_DATABASE_URL` if set; the name must end with `_test`. It is
   created and migrated automatically, and each test runs in a transaction
   that is rolled back. Concurrency tests

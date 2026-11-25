@@ -67,13 +67,20 @@ async def validation_exception_handler(
     request: Request,
     exc: RequestValidationError,
 ) -> JSONResponse:
-    # `detail` keeps FastAPI's list of field errors.
+    # `detail` lists the failing fields: where, what kind, and the message.
+    # Never the submitted value (`input`) or the validator context: a field
+    # can hold a password, a card terminal reference or a private note.
     return error_response(
         request,
         status_code=422,
         code=ErrorCode.VALIDATION_ERROR,
         message=VALIDATION_ERROR_MESSAGE,
-        detail=jsonable_encoder(exc.errors()),
+        detail=jsonable_encoder(
+            [
+                {"loc": error.get("loc", ()), "msg": error.get("msg", ""), "type": error.get("type", "")}
+                for error in exc.errors()
+            ]
+        ),
     )
 
 

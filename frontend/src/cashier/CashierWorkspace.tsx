@@ -1,11 +1,15 @@
-import { useState, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 
 import type { CurrentUser } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
-import { ForbiddenState, PlaceholderSection } from "./CashierStates";
+import { ForbiddenState } from "./CashierStates";
+import { OrdersSection } from "./OrdersSection";
 import { OverviewSection } from "./OverviewSection";
+import { PaymentsSection } from "./PaymentsSection";
 import { PendingOperationsBanner } from "./PendingOperationsBanner";
 import { pendingOperations as defaultStore, type PendingOperationStore } from "./pendingOperations";
+import { RegisterSection } from "./RegisterSection";
+import { ReportsSection } from "./ReportsSection";
 import { accessibleSections, canAccessSection, isSectionId, sectionById, type CashierSectionId } from "./sections";
 import { SettingsSection } from "./SettingsSection";
 
@@ -26,10 +30,25 @@ export function CashierWorkspace({ token, user, nav, store = defaultStore }: Cas
     return stored && canAccessSection(user, stored) ? stored : (sections[0]?.id ?? "settings");
   });
 
+  // The bill open in Payments (chosen in Orders), and the restaurant's
+  // currency once a bill told it (cashier orders carry no currency).
+  const [billId, setBillId] = useState<string | null>(null);
+  const [currency, setCurrency] = useState<string | null>(readStoredCurrency);
+
   function choose(next: CashierSectionId) {
     storeSection(next);
     setSection(next);
   }
+
+  function openBill(id: string) {
+    setBillId(id);
+    if (canAccessSection(user, "payments")) choose("payments");
+  }
+
+  const rememberCurrency = useCallback((value: string) => {
+    setCurrency(value);
+    storeCurrency(value);
+  }, []);
 
   return (
     <div className="app cx">
@@ -71,7 +90,17 @@ export function CashierWorkspace({ token, user, nav, store = defaultStore }: Cas
         <main className="cx-main">
           <PendingOperationsBanner store={store} user={user} token={token} />
           <SectionGuard user={user} section={section}>
-            <SectionContent section={section} token={token} user={user} />
+            <SectionContent
+              section={section}
+              token={token}
+              user={user}
+              store={store}
+              billId={billId}
+              currency={currency}
+              onOpenBill={openBill}
+              onChooseOrder={() => choose("orders")}
+              onCurrency={rememberCurrency}
+            />
           </SectionGuard>
         </main>
       </div>
@@ -93,36 +122,60 @@ export function SectionGuard({
   return <>{children}</>;
 }
 
-function SectionContent({ section, token, user }: { section: CashierSectionId; token: string; user: CurrentUser }) {
+interface SectionContentProps {
+  section: CashierSectionId;
+  token: string;
+  user: CurrentUser;
+  store: PendingOperationStore;
+  billId: string | null;
+  currency: string | null;
+  onOpenBill(billId: string): void;
+  onChooseOrder(): void;
+  onCurrency(currency: string): void;
+}
+
+function SectionContent({ section, token, user, store, billId, currency, onOpenBill, onChooseOrder, onCurrency }: SectionContentProps) {
   switch (section) {
     case "overview":
-      return <OverviewSection token={token} user={user} />;
+      return <OverviewSection token={token} user={user} onCurrency={onCurrency} />;
     case "orders":
-      return (
-        <PlaceholderSection title="Orders">
-          Orders waiting for payment and settled orders will be listed here.
-        </PlaceholderSection>
-      );
+      return <OrdersSection token={token} user={user} store={store} currency={currency} onOpenBill={onOpenBill} />;
     case "payments":
       return (
-        <PlaceholderSection title="Payments">
-          Taking cash and card payments, splitting bills and refunds will be available here.
-        </PlaceholderSection>
+        <PaymentsSection
+          token={token}
+          user={user}
+          store={store}
+          billId={billId}
+          onChooseOrder={onChooseOrder}
+          onCurrency={onCurrency}
+        />
       );
     case "register":
-      return (
-        <PlaceholderSection title="Cash Register">
-          Opening, handing over and closing cash shifts, and cash in / out, will be available here.
-        </PlaceholderSection>
-      );
+      return <RegisterSection token={token} user={user} store={store} onCurrency={onCurrency} />;
     case "reports":
-      return (
-        <PlaceholderSection title="Reports">
-          Business day and shift reports will be available here.
-        </PlaceholderSection>
-      );
+      return <ReportsSection token={token} user={user} store={store} />;
     case "settings":
       return <SettingsSection />;
+  }
+}
+
+const CURRENCY_KEY = "restaurantos.cashier.currency";
+
+function readStoredCurrency(): string | null {
+  try {
+    const value = window.sessionStorage.getItem(CURRENCY_KEY);
+    return value && /^[A-Z]{3}$/.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeCurrency(value: string): void {
+  try {
+    window.sessionStorage.setItem(CURRENCY_KEY, value);
+  } catch {
+    // Not remembered across reloads.
   }
 }
 

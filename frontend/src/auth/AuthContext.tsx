@@ -4,12 +4,14 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
 
 import { isApiError } from "../api/client";
-import { getMe, login as loginRequest } from "../api/endpoints";
+import { getMe, login as loginRequest, logoutRequest } from "../api/endpoints";
+import { pendingOperations } from "../cashier/pendingOperations";
 import type { CurrentUser } from "../api/types";
 import { clearToken, readToken, tokenExpiresAt, writeToken } from "./tokenStorage";
 
@@ -36,7 +38,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     readToken() ? { status: "restoring" } : { status: "anonymous", notice: null },
   );
 
+  // The session being ended, read by logout without re-creating it.
+  const current = useRef(state);
+  current.current = state;
+
   const logout = useCallback((notice: string | null = null) => {
+    const ending = current.current;
+    if (ending.status === "authenticated") {
+      // A sign-out the user chose (no notice) also revokes the token on the
+      // server, so a copy of it is useless; an expired or refused session
+      // has nothing left to revoke. Best effort: signing out never waits.
+      if (notice === null) void logoutRequest(ending.token).catch(() => undefined);
+      // The next person at a shared till sees none of this user's resolved
+      // cashier operations; unresolved ones stay for a safe retry.
+      void pendingOperations.purgeResolvedOf(ending.user).catch(() => undefined);
+    }
     clearToken();
     setState({ status: "anonymous", notice });
   }, []);

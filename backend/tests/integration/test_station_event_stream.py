@@ -31,11 +31,12 @@ from tests.factories import assign_station, create_station, create_user
 WAIT_SECONDS = 5
 
 
-def token_for(user_id, restaurant_id, role_id):
+def token_for(user_id, restaurant_id, role_id, token_version=0):
     return create_access_token(
         user_id=user_id,
         restaurant_id=restaurant_id,
         role_id=role_id,
+        token_version=token_version,
     )
 
 
@@ -264,6 +265,10 @@ def test_binary_authentication_is_rejected(floor, hub):
 def forged(floor, **claims):
     claims.setdefault("sub", str(floor.ids["cook"]))
     claims.setdefault("exp", datetime.now(timezone.utc) + timedelta(minutes=5))
+    # What every issued token carries (token version and id), so each case
+    # is refused for the reason it names.
+    claims.setdefault("ver", 0)
+    claims.setdefault("jti", str(uuid.uuid4()))
     secret = claims.pop("secret", settings.jwt_secret_key)
     return jwt.encode(claims, secret, algorithm=settings.jwt_algorithm)
 
@@ -282,7 +287,7 @@ def test_invalid_credentials_are_rejected(floor, hub, case):
         "unknown user": lambda: forged(floor, sub=str(uuid.uuid4())),
         "no subject": lambda: forged(floor, sub=None),
         "no expiry": lambda: jwt.encode(
-            {"sub": str(floor.ids["cook"])},
+            {"sub": str(floor.ids["cook"]), "ver": 0, "jti": str(uuid.uuid4())},
             settings.jwt_secret_key,
             algorithm=settings.jwt_algorithm,
         ),

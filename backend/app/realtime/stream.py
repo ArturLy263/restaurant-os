@@ -118,6 +118,9 @@ def authorize_station_stream(app, token: str, station_id: uuid.UUID) -> StreamGr
         raise StreamClosed(4000 + exc.status_code, str(exc.code)) from None
 
 
+MAX_AUTH_MESSAGE_CHARS = 16_384
+
+
 class StationEventStream:
 
     def __init__(self, websocket: WebSocket, station_id: uuid.UUID):
@@ -189,6 +192,10 @@ class StationEventStream:
             # A binary first message (receive_text found no "text").
             raise _not_authenticated() from None
 
+        # The first message only carries a token; anything far larger is
+        # not one (and is not parsed).
+        if len(raw) > MAX_AUTH_MESSAGE_CHARS:
+            raise _not_authenticated()
         try:
             message = json.loads(raw)
         except ValueError:

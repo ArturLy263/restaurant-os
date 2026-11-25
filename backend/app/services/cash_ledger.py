@@ -30,6 +30,7 @@ from app.db.models.bill import Payment, Refund
 from app.db.models.cash import (
     MOVEMENT_SIGNS,
     BusinessDay,
+    CashCountExplanation,
     CashMovement,
     CashOpeningCorrection,
     CashShift,
@@ -184,6 +185,27 @@ def drawer(db: Session, shift: CashShift) -> Drawer:
     )
 
 
+def followup_explanation(db: Session, shift_id: uuid.UUID, kind: str) -> str | None:
+    """The explanation given after the count (kind CLOSING or HANDOVER)."""
+
+    return db.scalar(
+        select(CashCountExplanation.explanation).where(
+            CashCountExplanation.cash_shift_id == shift_id,
+            CashCountExplanation.kind == kind,
+        )
+    )
+
+
+def closing_explanation(db: Session, closing: CashShiftClosing) -> str | None:
+    """Given with the count, or afterwards."""
+
+    return closing.explanation or followup_explanation(db, closing.cash_shift_id, "CLOSING")
+
+
+def handover_reason(db: Session, handover: CashShiftHandover) -> str | None:
+    return handover.reason or followup_explanation(db, handover.to_shift_id, "HANDOVER")
+
+
 def shift_report(db: Session, shift: CashShift) -> dict:
     """The shift's money: payments, refunds, tips and its drawer; with
     its closing once closed."""
@@ -203,13 +225,17 @@ def shift_report(db: Session, shift: CashShift) -> dict:
             "expected_amount": money(closing.expected_amount),
             "counted_amount": money(closing.counted_amount),
             "difference": money(closing.difference),
-            "explanation": closing.explanation,
+            "explanation": closing_explanation(db, closing),
         }
     )
     return report
 
 
-def handover_report(handover: CashShiftHandover, names: dict[uuid.UUID, str]) -> dict:
+def handover_report(
+    handover: CashShiftHandover,
+    names: dict[uuid.UUID, str],
+    reason: str | None = None,
+) -> dict:
     return {
         "id": str(handover.id),
         "from_shift_id": str(handover.from_shift_id),
@@ -219,7 +245,7 @@ def handover_report(handover: CashShiftHandover, names: dict[uuid.UUID, str]) ->
         "handed_over_amount": money(handover.handed_over_amount),
         "received_amount": money(handover.received_amount),
         "difference": money(handover.difference),
-        "reason": handover.reason,
+        "reason": reason if reason is not None else handover.reason,
         "outgoing_user": names.get(handover.outgoing_user_id),
         "incoming_user": names.get(handover.incoming_user_id),
         "self_confirmed": handover.outgoing_user_id == handover.incoming_user_id,
@@ -271,7 +297,7 @@ def day_report(db: Session, day: BusinessDay, currency: str) -> dict:
         "currency": currency,
         **flows(db, business_day_id=day.id).as_report(),
         "shifts": shift_reports,
-        "handovers": [handover_report(h, names) for h in handovers],
+        "handovers": [handover_report(h, names, handover_reason(db, h)) for h in handovers],
         "closing_difference_total": money(closing_difference),
         "handover_difference_total": money(sum((h.difference for h in handovers), ZERO)),
     }

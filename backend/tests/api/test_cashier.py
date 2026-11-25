@@ -1,6 +1,6 @@
 """The cashier module through the API: business days, the shared register's
 shifts and handovers, payments (cash, manual card, tips, splits), refunds
-and reports (docs/stage-3-cashier-plan.md)."""
+and reports (docs/archive/stage-3-cashier-plan.md)."""
 
 import uuid
 from datetime import date, datetime, timedelta
@@ -212,33 +212,97 @@ def test_closing_a_shift_leaves_orders_tables_and_bills_working(open_till):
     assert till.bill(bill["id"])["status"] == "PAID"
 
 
-def test_closing_needs_an_explanation_for_a_difference(open_till):
+def test_a_closing_difference_is_recorded_blind_and_must_be_explained_before_the_day_closes(open_till):
     till = open_till
     _, _, bill = till.billed_order()
     till.ok(till.pay(bill["id"], "12.50"), 201)
 
-    refused = till.error(till.close_shift(till.shift["id"], "110.00"), 422, "CLOSING_EXPLANATION_REQUIRED")
-    # Blind count: the refusal doesn't say what was expected.
-    assert "112.50" not in refused["message"] and "2.50" not in refused["message"]
-    closed = till.ok(till.close_shift(till.shift["id"], "110.00", "Short 2.50, unclear"))
-
-    # The cashier sees their own count, never the expected cash...
+    # The count is recorded whatever it is: no refusal depends on the
+    # expected cash (a refusal would let a cashier test guesses).
+    closed = till.ok(till.close_shift(till.shift["id"], "110.00"))
+    # The cashier sees their own count, never the expected cash; the
+    # recorded (final) count is flagged as needing an explanation.
     assert closed["closing"] == {
         "expected_amount": None,
         "counted_amount": "110.00",
         "difference": None,
-        "explanation": "Short 2.50, unclear",
+        "explanation": None,
+        "explanation_required": True,
         "user": {"id": str(till.cashier.id), "name": till.cashier.name},
         "created_at": closed["closing"]["created_at"],
     }
     assert (closed["expected_cash"], closed["drawer"], closed["expected_visible"]) == (None, None, False)
+    # The count is final: whatever is sent next, the shift is closed.
+    for guess in ("112.50", "110.00", "1.00"):
+        till.error(till.close_shift(till.shift["id"], guess, "again"), 409, "CASH_SHIFT_NOT_OPEN")
     # ...the manager sees the whole result.
     managed = till.shift_view(till.shift["id"])
     assert managed["expected_visible"] is True
     assert {k: managed["closing"][k] for k in ("expected_amount", "counted_amount", "difference")} == {
         "expected_amount": "112.50", "counted_amount": "110.00", "difference": "-2.50",
     }
-    till.error(till.close_shift(till.shift["id"], "110.00", "again"), 409, "CASH_SHIFT_NOT_OPEN")
+
+    # The day cannot close while the difference is unexplained; the refusal
+    # names the shift, never an amount.
+    refused = till.error(
+        till.call("POST", f"/api/v1/business-days/{till.day['id']}/close", till.manager),
+        409, "CASH_DIFFERENCE_UNEXPLAINED",
+    )
+    assert refused["details"] == {"counts": [{"cash_shift_id": till.shift["id"], "kind": "CLOSING"}]}
+    assert "2.50" not in refused["message"] and "112.50" not in refused["message"]
+
+    path = f"/api/v1/cash/shifts/{till.shift['id']}/closing-explanation"
+    # Only the cashier who counted (or management) explains it.
+    till.error(till.call("POST", path, till.cashier2, {"explanation": "not mine"}), 403, "PERMISSION_DENIED")
+    till.error(till.call("POST", path, till.cashier, {"explanation": "  "}), 422, "VALIDATION_ERROR")
+    explained = till.ok(till.call("POST", path, till.cashier, {"explanation": "Short 2.50, unclear"}), 201)
+    assert (explained["kind"], explained["explanation"], explained["user_id"]) == (
+        "CLOSING", "Short 2.50, unclear", str(till.cashier.id),
+    )
+    till.error(till.call("POST", path, till.manager, {"explanation": "again"}), 409, "DIFFERENCE_ALREADY_EXPLAINED")
+    view = till.shift_view(till.shift["id"], till.cashier)
+    assert (view["closing"]["explanation"], view["closing"]["explanation_required"]) == ("Short 2.50, unclear", False)
+
+    till.ok(till.call("POST", f"/api/v1/business-days/{till.day['id']}/close", till.manager))
+    report = till.day_report(till.day["id"])
+    assert report["shifts"][0]["closing"]["explanation"] == "Short 2.50, unclear"
+    assert report["closing_difference_total"] == "-2.50"
+    # After the day closed, the frozen report can no longer change.
+    till.error(till.call("POST", path, till.manager, {"explanation": "late"}), 409, "BUSINESS_DAY_NOT_OPEN")
+
+
+def test_an_exact_count_needs_no_explanation_and_explaining_it_is_refused(open_till):
+    till = open_till
+    closed = till.ok(till.close_shift(till.shift["id"], "100.00"))
+    assert (closed["closing"]["explanation"], closed["closing"]["explanation_required"]) == (None, False)
+    path = f"/api/v1/cash/shifts/{till.shift['id']}/closing-explanation"
+    till.error(till.call("POST", path, till.cashier, {"explanation": "x"}), 409, "NO_DIFFERENCE_TO_EXPLAIN")
+
+
+def test_explaining_a_shift_that_is_still_open_is_refused(open_till):
+    till = open_till
+    path = f"/api/v1/cash/shifts/{till.shift['id']}/closing-explanation"
+    till.error(till.call("POST", path, till.cashier, {"explanation": "x"}), 409, "CASH_COUNT_NOT_RECORDED")
+
+
+def test_closing_responses_never_depend_on_how_far_the_count_is_off(open_till):
+    """No oracle: for a cashier, a count that matches the expected cash and
+    one that does not get the same status, the same fields and no amount
+    they could not already see; nothing is refused for a difference."""
+
+    till = open_till
+    results = []
+    for counted in ("100.00", "99.99"):
+        result = till.ok(till.close_shift(till.shift["id"], counted))
+        results.append(result)
+        assert result["closing"]["expected_amount"] is None and result["closing"]["difference"] is None
+        assert result["expected_cash"] is None and result["drawer"] is None
+        # Next shift (the same cashier may open it after a non-handover close
+        # only with self-confirm; use the second cashier).
+        till.shift = till.ok(till.open_shift(counted, user=till.cashier2), 201)
+        till.cashier, till.cashier2 = till.cashier2, till.cashier
+    assert set(results[0]) == set(results[1])
+    assert set(results[0]["closing"]) == set(results[1]["closing"])
 
 
 # --- Opening balance corrections ---
@@ -521,8 +585,17 @@ def test_handover_discrepancy_is_recorded_with_its_reason(open_till, received, d
     # Expected 150.00, counted 150.00 by the outgoing cashier.
     till.ok(till.close_shift(till.shift["id"], "150.00"))
 
-    till.error(till.open_shift(received, user=till.cashier2), 422, "HANDOVER_REASON_REQUIRED")
-    incoming = till.ok(till.open_shift(received, "Recounted twice", user=till.cashier2), 201)
+    # The incoming count is recorded whatever it is (no refusal tells the
+    # incoming cashier whether it matched what was handed over)...
+    incoming = till.ok(till.open_shift(received, user=till.cashier2), 201)
+    assert (incoming["handover"]["reason"], incoming["handover"]["explanation_required"]) == (None, True)
+    # ...and is final: no second attempt.
+    till.error(till.open_shift(received, "again", user=till.cashier2), 409, "CASH_SHIFT_ALREADY_OPEN")
+    explain = f"/api/v1/cash/shifts/{incoming['id']}/handover-explanation"
+    till.error(till.call("POST", explain, till.cashier, {"explanation": "not mine"}), 403, "PERMISSION_DENIED")
+    till.ok(till.call("POST", explain, till.cashier2, {"explanation": "Recounted twice"}), 201)
+    incoming = till.shift_view(incoming["id"], till.cashier2)
+    assert incoming["handover"]["explanation_required"] is False
 
     handover = incoming["handover"]
     # The incoming cashier sees the counts (theirs is in), not the

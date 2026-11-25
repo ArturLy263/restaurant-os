@@ -57,6 +57,7 @@ def test_token_for_unknown_user_is_rejected(db_client, restaurant):
         user_id=uuid.uuid4(),
         restaurant_id=restaurant.restaurant.id,
         role_id=restaurant.role.id,
+        token_version=0,
     )
 
     response = db_client.get(
