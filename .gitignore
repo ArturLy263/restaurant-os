@@ -11,3 +11,22 @@ __pycache__/
 .coverage
 htmlcov/
 .DS_Store
+
+# Local-only development seed (never commit).
+backend/seed_dev_staff.py
+
+# Logs, local databases and dumps
+*.log
+*.sqlite3
+*.db
+*.dump
+*.sql.gz
+
+# Editor-local files (the shared .vscode/settings.json stays tracked)
+.idea/
+.vscode/*
+!.vscode/settings.json
+
+# Coverage and temporary files
+frontend/coverage/
+*.tmp
